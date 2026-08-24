@@ -1,0 +1,48 @@
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <mutex>
+
+import common;
+import settings;
+import logging;
+import display;
+import aniso;
+import fov;
+import maxfps;
+import rawmouse;
+import comicpanels;
+import updatecheck;
+
+void Init()
+{
+    CSettings::ReadIniSettings();
+    MongooseFix::onStartupPromptEvent().executeAll();
+    MongooseFix::onInitEvent().executeAll();
+}
+
+extern "C"
+{
+    void __declspec(dllexport) InitializeASI()
+    {
+        std::call_once(CallbackHandler::flag, []()
+        {
+            CallbackHandler::RegisterCallback(Init);
+            CallbackHandler::RegisterCallback(L"Engine.dll", []() { MongooseFix::onEngineInitEvent().executeAll(); });
+            CallbackHandler::RegisterCallback(L"D3DDrv.dll", []() { MongooseFix::onD3DDrvInitEvent().executeAll(); });
+        });
+    }
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        // Ultimate ASI Loader calls InitializeASI itself. Nothing else does.
+        if (!IsUALPresent()) { InitializeASI(); }
+    }
+    if (reason == DLL_PROCESS_DETACH)
+    {
+        MongooseFix::onShutdownEvent().executeAll();
+    }
+    return TRUE;
+}
