@@ -7,6 +7,8 @@ import settings;
 import logging;
 import display;
 import aniso;
+import msaa;
+import internalres;
 import fov;
 import maxfps;
 import rawmouse;

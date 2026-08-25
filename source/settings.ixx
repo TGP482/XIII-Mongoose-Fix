@@ -15,18 +15,20 @@ export enum Pref
     PREF_VSYNC,
     PREF_MAXFRAMERATE,
     PREF_ANISOTROPICFILTERING,
+    PREF_MSAA,
+    PREF_INTERNALRESX,
+    PREF_INTERNALRESY,
+    PREF_SCALINGFILTER,
     PREF_MOUSESENSITIVITY,
     PREF_MOUSESMOOTHING,
     PREF_FIELDOFVIEW,
-    PREF_COMICPANELSCALING,
-    PREF_COMICPANELSCALE,
     PREF_SKIPINTROMOVIES,
 
     COUNT,
 };
 
-// The script's FOV base. Weapon zoom levels and the viewmodel offset are authored against it, so
-// it is what the FOV module scales from.
+// The script FOV base. Weapon zoom levels and the viewmodel offset are authored against it, so the
+// FOV module scales from it.
 export inline constexpr auto fStockFieldOfView = 85.0f;
 
 export class CSettings
@@ -40,7 +42,7 @@ public:
     {
         CIniReader iniReader("");
 
-        // 0 on either axis means "whatever the desktop is".
+        // 0 on either axis means the desktop.
         auto nResolutionX = iniReader.ReadInteger("Display", "ResolutionX", 0);
         auto nResolutionY = iniReader.ReadInteger("Display", "ResolutionY", 0);
         mPrefs[PREF_RESOLUTIONX] = nResolutionX < 1 ? 0 : std::clamp(nResolutionX, 320, 16384);
@@ -48,11 +50,23 @@ public:
 
         mPrefs[PREF_VSYNC] = std::clamp(iniReader.ReadInteger("Display", "VSync", 1), 0, 1);
 
-        // 0 unlocks. Anything else goes to the engine's tick rate governor, which sleeps rather
-        // than spins, so a cap is cheaper than none.
+        // 0 unlocks. Anything else goes to the engine tick rate governor, which sleeps rather than
+        // spins, so a cap is cheaper than none.
         mPrefs[PREF_MAXFRAMERATE] = std::clamp(iniReader.ReadInteger("Display", "MaxFrameRate", 0), 0, 9999);
 
         mPrefs[PREF_ANISOTROPICFILTERING] = std::clamp(iniReader.ReadInteger("Graphics", "AnisotropicFiltering", 16), 0, 16);
+
+        // 0, 2, 4 or 8; anything between rounds down to the next real level.
+        auto nMSAA = std::clamp(iniReader.ReadInteger("Graphics", "MSAA", 0), 0, 8);
+        mPrefs[PREF_MSAA] = nMSAA >= 8 ? 8 : nMSAA >= 4 ? 4 : nMSAA >= 2 ? 2 : 0;
+
+        // Either axis off turns the pair off; a partial size has no meaning.
+        auto nInternalX = iniReader.ReadInteger("Display", "InternalResolutionX", 0);
+        auto nInternalY = iniReader.ReadInteger("Display", "InternalResolutionY", 0);
+        const auto bInternal = nInternalX > 0 && nInternalY > 0;
+        mPrefs[PREF_INTERNALRESX] = bInternal ? std::clamp(nInternalX, 320, 16384) : 0;
+        mPrefs[PREF_INTERNALRESY] = bInternal ? std::clamp(nInternalY, 240, 16384) : 0;
+        mPrefs[PREF_SCALINGFILTER] = std::clamp(iniReader.ReadInteger("Display", "ScalingFilter", 1), 0, 1);
 
         mPrefs[PREF_MOUSESMOOTHING] = std::clamp(iniReader.ReadInteger("Input", "MouseSmoothing", 0), 0, 1);
 
@@ -60,12 +74,6 @@ public:
         mPrefs[PREF_MOUSESENSITIVITY] = fMouseSensitivity <= 0.0f ? 1.0f : std::clamp(fMouseSensitivity, 0.01f, 10.0f);
 
         mPrefs[PREF_FIELDOFVIEW] = std::clamp(iniReader.ReadFloat("FieldOfView", "FieldOfView", fStockFieldOfView), 45.0f, 145.0f);
-
-        mPrefs[PREF_COMICPANELSCALING] = std::clamp(iniReader.ReadInteger("Interface", "ComicPanelScaling", 1), 0, 2);
-
-        // 0 derives the factor from the height the art was drawn for.
-        auto fComicPanelScale = iniReader.ReadFloat("Interface", "ComicPanelScale", 0.0f);
-        mPrefs[PREF_COMICPANELSCALE] = fComicPanelScale <= 0.0f ? 0.0f : std::clamp(fComicPanelScale, 0.25f, 4.0f);
 
         mPrefs[PREF_SKIPINTROMOVIES] = std::clamp(iniReader.ReadInteger("Interface", "SkipIntroMovies", 1), 0, 1);
 
@@ -114,7 +122,7 @@ void BindFloat(T& target, Pref pref)
     ApplyAndWatch([&target, pref]() { target = MongooseFixSettings.GetFloat(pref); });
 }
 
-// A byte patch written while the setting is on and put back while it is off.
+// A byte patch written while the setting is on, put back while it is off.
 export void BindPatch(raw_mem& patch, Pref pref)
 {
     ApplyAndWatch([&patch, pref]() { patch.Set(MongooseFixSettings.GetInt(pref) != 0); });

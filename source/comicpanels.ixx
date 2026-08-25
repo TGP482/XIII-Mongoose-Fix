@@ -5,60 +5,73 @@ module;
 export module comicpanels;
 
 import common;
-import settings;
 import display;
 import logging;
 
-// The onomatopoeia sprites are drawn by script in Xiii.u through UCanvas. Level 2 scales the two
-// canvas entry points those draws land in, and is off by default because it catches anything else
-// drawn the same way. GetScreenHeight's 480 and the icon scale are left to hudscale.ixx.
-static constexpr auto fAuthoredScreenHeight = 480.0f;
-static constexpr auto nOffsetCanvasClipX = 0x3C;
-static constexpr auto nOffsetCanvasClipY = 0x40;
+// A real time panel is not drawn from the world - the world renders into URenderTargetMaterial and
+// the panel is a tile of it. That material is one 256x256 atlas shared by every panel, handed out
+// in 8 unit cells over a 32 bit mask, so a panel is a couple hundred texels however large it lands
+// on screen. Hence the blocks.
+//
+// The atlas texture and the size the material reports are separate: FCanvasUtil::DrawTile divides
+// texture coordinates by GetUSize/GetVSize, so leaving those at 256 keeps every number script has -
+// AllocRect cells, tile coordinates - and only Update's rect, which addresses real texels, grows
+// with the texture.
+//
+//   URenderTargetMaterial  +0x54 USize  +0x58 VSize  +0x64 FBaseTexture*  +0x68 32 dword cell mask
+//   FBaseTexture           +0x08 revision  +0x0C width  +0x10 height
+static constexpr auto nAuthoredAtlas = 256;
+static constexpr auto nMaxAtlas = 4096;
+static constexpr auto nOffsetTexture = 0x64;
+static constexpr auto nIndexRevision = 2;
+static constexpr auto nIndexWidth = 3;
+static constexpr auto nIndexHeight = 4;
 
-static std::atomic<int> nComicPanelScaling = 1;
-static std::atomic<float> fComicPanelScaleOverride = 0.0f;
+static SafetyHookMid mhRenderTargetUpdate{};
 
-static SafetyHookInline shDrawTileScaled{};
-static SafetyHookInline shDrawTileJustified{};
-
-static float GetScaleFactor()
+// Powers of two only: the atlas is a render target, the driver may refuse an odd size.
+static int AtlasSize()
 {
-    const auto fOverride = fComicPanelScaleOverride.load();
-    if (fOverride > 0.0f)
-        return fOverride;
+    auto nSize = nAuthoredAtlas;
 
-    const auto nHeight = nBackBufferHeight.load();
-    return nHeight > 0 ? static_cast<float>(nHeight) / fAuthoredScreenHeight : 1.0f;
+    while (nSize < nMaxAtlas && nSize * 2 <= nBackBufferHeight.load())
+        nSize *= 2;
+
+    return nSize;
 }
 
-// About the middle of the screen, so a centred panel stays centred as it grows.
-static void ScaleAboutCentre(uint8_t* pCanvas, float& fX, float& fY, float& fXScale, float& fYScale)
+static void RenderTargetUpdate(SafetyHookContext& ctx)
 {
-    const auto fFactor = GetScaleFactor();
-    const auto fCentreX = *reinterpret_cast<float*>(pCanvas + nOffsetCanvasClipX) * 0.5f;
-    const auto fCentreY = *reinterpret_cast<float*>(pCanvas + nOffsetCanvasClipY) * 0.5f;
+    auto pMaterial = reinterpret_cast<uint8_t*>(ctx.ecx);
+    if (!pMaterial)
+        return;
 
-    fX = fCentreX + (fX - fCentreX) * fFactor;
-    fY = fCentreY + (fY - fCentreY) * fFactor;
-    fXScale *= fFactor;
-    fYScale *= fFactor;
-}
+    auto pTexture = *reinterpret_cast<int32_t**>(pMaterial + nOffsetTexture);
+    if (!pTexture)
+        return;
 
-static void __fastcall DrawTileScaled(uint8_t* pThis, void*, void* pMaterial, float fX, float fY, float fXScale, float fYScale)
-{
-    if (nComicPanelScaling.load() >= 2)
-        ScaleAboutCentre(pThis, fX, fY, fXScale, fYScale);
+    const auto nSize = AtlasSize();
 
-    shDrawTileScaled.fastcall<void>(pThis, nullptr, pMaterial, fX, fY, fXScale, fYScale);
-}
+    // The revision is what makes the renderer throw the old texture away.
+    if (pTexture[nIndexWidth] != nSize)
+    {
+        pTexture[nIndexWidth] = nSize;
+        pTexture[nIndexHeight] = nSize;
+        pTexture[nIndexRevision]++;
 
-static void __fastcall DrawTileJustified(uint8_t* pThis, void*, void* pMaterial, float fX, float fY, float fXScale, float fYScale, uint8_t nJustification)
-{
-    if (nComicPanelScaling.load() >= 2)
-        ScaleAboutCentre(pThis, fX, fY, fXScale, fYScale);
+        LogInfo("ComicPanels: panel atlas {}x{}", nSize, nSize);
+    }
 
-    shDrawTileJustified.fastcall<void>(pThis, nullptr, pMaterial, fX, fY, fXScale, fYScale, nJustification);
+    const auto nScale = nSize / nAuthoredAtlas;
+    if (nScale <= 1)
+        return;
+
+    // X, Y, width, height: the first four stack arguments.
+    for (auto nOffset = 0x04; nOffset <= 0x10; nOffset += 4)
+    {
+        auto pValue = reinterpret_cast<int32_t*>(ctx.esp + nOffset);
+        *pValue *= nScale;
+    }
 }
 
 static void InitEngine()
@@ -67,10 +80,19 @@ static void InitEngine()
     if (!hEngine)
         return;
 
-    // Not hooked: hudscale.ixx already hooks the entry of both to add the canvas origin, and its
-    // pass-wide scaling covers what level 2 did here.
-    BindInt(nComicPanelScaling, PREF_COMICPANELSCALING);
-    BindFloat(fComicPanelScaleOverride, PREF_COMICPANELSCALE);
+    auto pUpdate = GetProcAddress(hEngine,
+        "?Update@URenderTargetMaterial@@UAEXHHHHABVFVector@@ABVFRotator@@MVFColor@@MPAVUMaterial@@@Z");
+
+    if (!pUpdate)
+    {
+        LogWarn("ComicPanels: Engine.dll did not export URenderTargetMaterial::Update, real time panels stay a 256x256 atlas");
+        return;
+    }
+
+    mhRenderTargetUpdate = safetyhook::create_mid(pUpdate, RenderTargetUpdate);
+
+    if (!mhRenderTargetUpdate)
+        LogWarn("ComicPanels: URenderTargetMaterial::Update could not be hooked, real time panels stay a 256x256 atlas");
 }
 
 class ComicPanels

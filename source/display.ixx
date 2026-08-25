@@ -7,13 +7,14 @@ export module display;
 import common;
 import settings;
 import logging;
+import internalres;
 
-// UD3DRenderDevice is where the window size, the vsync flag and the D3D8 device all live, so one
-// module owns the render device pointer and hands it to whoever else needs it.
+// UD3DRenderDevice holds the window size, the vsync flag and the D3D8 device, so one module owns
+// the render device pointer and hands it out.
 //
 // Field offsets, all from D3DDrv.dll:
-//   +0x0D8  UseVSync            config bool the game already has but only honours fullscreen
-//   +0x178  MaxAnisotropy       fetched from D3DCAPS8 at Init and then never used by the game
+//   +0x0D8  UseVSync            config bool the game has but only honours fullscreen
+//   +0x178  MaxAnisotropy       fetched from D3DCAPS8 at Init, never used by the game
 //   +0x64C  bFullscreen
 //   +0x658  SizeX
 //   +0x65C  SizeY
@@ -29,8 +30,7 @@ static uint8_t* pRenderDevice = nullptr;
 static void* pLastViewport = nullptr;
 static int nLastFullscreen = 0;
 
-// Read back by comicpanels.ixx, which has no other way to learn the real height at the point it
-// needs it.
+// Read back by comicpanels.ixx, which has no other way to learn the real height when it needs it.
 export std::atomic<int> nBackBufferWidth = 0;
 export std::atomic<int> nBackBufferHeight = 0;
 
@@ -44,8 +44,7 @@ export int GetDeviceMaxAnisotropy()
     return pRenderDevice ? *reinterpret_cast<int*>(pRenderDevice + nOffsetMaxAnisotropy) : 1;
 }
 
-// Raised whenever a device has just been created or reset, so modules that hook the device
-// itself can put their hooks back on.
+// Raised after a device is created or reset, so modules that hook the device can re-hook.
 export MongooseFix::Event<>& onDeviceResetEvent()
 {
     static MongooseFix::Event<> e;
@@ -55,15 +54,14 @@ export MongooseFix::Event<>& onDeviceResetEvent()
 static std::atomic<bool> bDisplayChangePending = false;
 
 // SetRes builds the whole D3DPRESENT_PARAMETERS block on its stack and uses it for CreateDevice,
-// for Reset and for the device-lost recovery path, so everything display related is decided here
-// and nowhere else.
+// Reset and device-lost recovery, so everything display related is decided here and nowhere else.
 static SafetyHookInline shSetRes{};
 static SafetyHookInline shPresent{};
 
 // The swap effect is computed as (Windowed ? 3 : 1) by one LEA. Bumping the +1 to +2 turns the
-// windowed case into D3DSWAPEFFECT_COPY_VSYNC, which is how vsync is asked for windowed under
-// Direct3D 8 - the presentation interval is only allowed to be DEFAULT there. Fullscreen becomes
-// FLIP instead of DISCARD, which is why the patch only goes on for windowed vsync.
+// windowed case into D3DSWAPEFFECT_COPY_VSYNC, which is how Direct3D 8 asks for windowed vsync -
+// the presentation interval may only be DEFAULT there. Fullscreen becomes FLIP instead of DISCARD,
+// so the patch goes on for windowed vsync only.
 static std::unique_ptr<raw_mem> patchWindowedSwapEffect;
 
 static void ResolveDesiredResolution(int& nX, int& nY)
@@ -71,8 +69,8 @@ static void ResolveDesiredResolution(int& nX, int& nY)
     auto nSettingX = MongooseFixSettings.GetInt(PREF_RESOLUTIONX);
     auto nSettingY = MongooseFixSettings.GetInt(PREF_RESOLUTIONY);
 
-    // 0 on an axis means the desktop, which is the only sensible default and the one thing the
-    // game's own resolution list cannot offer.
+    // 0 on an axis means the desktop: the only sensible default, and the one thing the game's own
+    // resolution list cannot offer.
     if (nSettingX == 0)
         nSettingX = GetSystemMetrics(SM_CXSCREEN);
     if (nSettingY == 0)
@@ -95,16 +93,22 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
 
     const auto bVSync = MongooseFixSettings.GetInt(PREF_VSYNC) != 0;
 
-    // Fullscreen honours this field on its own; windowed needs the swap effect instead.
+    // Fullscreen honours this field itself; windowed needs the swap effect instead.
     *reinterpret_cast<int*>(pThis + nOffsetUseVSync) = bVSync ? 1 : 0;
 
     if (patchWindowedSwapEffect)
         patchWindowedSwapEffect->Set(bVSync && nFullscreen == 0);
 
+    // Our render target is D3DPOOL_DEFAULT and SetRes resets the device, so it goes first.
+    ReleaseInternalRes();
+
     const auto nResult = shSetRes.fastcall<int>(pThis, nullptr, pViewport, nX, nY, nFullscreen);
 
     if (patchWindowedSwapEffect)
         patchWindowedSwapEffect->Restore();
+
+    // Stamps the internal render size over SizeX/SizeY, so the read below reports it.
+    ApplyInternalRes(pThis, reinterpret_cast<uint8_t*>(pViewport));
 
     nBackBufferWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
     nBackBufferHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
@@ -116,8 +120,8 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     return nResult;
 }
 
-// The ini watcher runs on its own thread and must not touch the device from there. Present is the
-// one place in the frame where the device is known to be idle, so a pending change is taken here.
+// The ini watcher runs on its own thread and must not touch the device there. Present is the one
+// place in the frame where the device is known idle, so a pending change is taken here.
 static void __fastcall Present(uint8_t* pThis, void*, void* pViewport)
 {
     if (bDisplayChangePending.exchange(false) && pRenderDevice)
@@ -130,6 +134,7 @@ static void __fastcall Present(uint8_t* pThis, void*, void* pViewport)
         SetRes(pThis, nullptr, pLastViewport ? pLastViewport : pViewport, nX, nY, nLastFullscreen);
     }
 
+    PresentInternalRes(pThis);
     shPresent.fastcall<void>(pThis, nullptr, pViewport);
 }
 
@@ -140,7 +145,7 @@ static void InitD3DDrv()
         return;
 
     // The render device keeps its decorated C++ names in the export table, so the two functions
-    // that matter can be asked for by name instead of scanned for.
+    // that matter are asked for by name instead of scanned for.
     auto pSetRes = GetProcAddress(hD3DDrv, "?SetRes@UD3DRenderDevice@@UAEHPAVUViewport@@HHH@Z");
     auto pPresent = GetProcAddress(hD3DDrv, "?Present@UD3DRenderDevice@@UAEXPAVUViewport@@@Z");
 
@@ -150,8 +155,7 @@ static void InitD3DDrv()
         return;
     }
 
-    // LEA ECX,[ECX+ECX*1+1] / MOV [EBP-0x88],ECX - the swap effect being written into the
-    // present parameters.
+    // LEA ECX,[ECX+ECX*1+1] / MOV [EBP-0x88],ECX - the swap effect written into present parameters.
     auto patternSwapEffect = module_pattern(L"D3DDrv.dll", "8D 4C 09 01 89 8D 78 FF FF FF");
     if (!patternSwapEffect.empty())
         patchWindowedSwapEffect = std::make_unique<raw_mem>(patternSwapEffect.get_first(3), std::initializer_list<uint8_t>{ 0x02 });
@@ -161,8 +165,8 @@ static void InitD3DDrv()
     shSetRes = safetyhook::create_inline(pSetRes, SetRes);
     shPresent = safetyhook::create_inline(pPresent, Present);
 
-    // Resolution and vsync both need a device reset to take, so a change asks for one rather
-    // than applying anything itself.
+    // Resolution and vsync both need a device reset, so a change asks for one rather than applying
+    // anything itself.
     MongooseFix::onIniFileChange() += []()
     {
         bDisplayChangePending = true;
