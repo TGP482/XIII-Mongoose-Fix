@@ -5,9 +5,8 @@ module;
 
 export module common;
 
-// Every module registers into one of these lists at static init and the loader fires them in
-// order. Priority exists because a few things genuinely have to run before the rest: the log
-// header, and the update prompt that blocks startup.
+// Modules register at static init and the loader fires the lists in order. Priority exists for the
+// log header and the update prompt that blocks startup.
 export class MongooseFix
 {
 public:
@@ -27,7 +26,7 @@ public:
             handlers.emplace_back(priority, std::move(handler));
         }
 
-        // Lower priority first. Ties keep registration order, which is why the sort is stable.
+        // Lower priority first; ties keep registration order, hence the stable sort.
         void executeAll(Args... args) const
         {
             auto ordered = handlers;
@@ -42,32 +41,34 @@ public:
         std::vector<std::pair<int, std::function<void(Args...)>>> handlers;
     };
 
-    // Fires once the asi is loaded, before the engine has done anything interesting.
+    // Fires once the asi is loaded, before the engine has done anything.
     static Event<>& onInitEvent()
     {
         static Event<> e;
         return e;
     }
 
-    // Modal prompts. Runs on the main thread ahead of onInitEvent, so nothing loads until the
-    // user has answered.
+    // Modal prompts, on the main thread ahead of onInitEvent, so nothing loads until answered.
     static Event<>& onStartupPromptEvent()
     {
         static Event<> e;
         return e;
     }
 
-    // Engine.dll and D3DDrv.dll are loaded by the exe well after this asi is mapped, so patches
-    // into them wait for their own event rather than for onInitEvent.
+    // The exe loads these well after the asi is mapped, so patches into them wait on their own
+    // event rather than onInitEvent.
     static Event<>& onEngineInitEvent() { static Event<> e; return e; }
     static Event<>& onD3DDrvInitEvent() { static Event<> e; return e; }
+    static Event<>& onGUIInitEvent()    { static Event<> e; return e; }
+    static Event<>& onCoreInitEvent()   { static Event<> e; return e; }
+    static Event<>& onWinDrvInitEvent() { static Event<> e; return e; }
 
     static Event<>& onIniFileChange()   { static Event<> e; return e; }
     static Event<>& onShutdownEvent()   { static Event<> e; return e; }
 };
 
-// Apply a setting now, and again every time the ini is re-read. Everything user facing goes
-// through this, so there is no such thing as a setting that only takes effect at startup.
+// Apply now and on every ini re-read. Everything user facing goes through this, so no setting is
+// startup-only.
 export inline void ApplyAndWatch(std::function<void()> fn)
 {
     fn();
@@ -163,8 +164,8 @@ export inline bool IsModuleUAL(HMODULE mod)
     return GetProcAddress(mod, "IsUltimateASILoader") != nullptr;
 }
 
-// The same binary has to work as an Ultimate ASI Loader plugin and under any other loader. UAL
-// calls InitializeASI itself; walking the stack for it is how we tell the two apart.
+// UAL calls InitializeASI itself and other loaders do not, so the stack is walked to tell them
+// apart.
 export bool IsUALPresent()
 {
     for (const auto& entry : std::stacktrace::current())
@@ -264,7 +265,7 @@ public:
     static inline std::once_flag flag;
 };
 
-// Returns the first pattern that matches, so one patch body can cover more than one build.
+// First pattern that matches, so one patch body can cover more than one build.
 export template <size_t count = 1, typename... Args>
 hook::pattern find_pattern(Args... args)
 {
@@ -273,18 +274,18 @@ hook::pattern find_pattern(Args... args)
     return pattern;
 }
 
-// A pattern scan restricted to one module. XIII spreads its code over five binaries, so a
-// program-wide scan is both slower and ambiguous.
-// An empty pattern when the module is not loaded, never a scan of whatever else is mapped: a
-// miss has to read as a miss to every caller's empty() check.
+// One module only: XIII spreads its code over five binaries, so a program-wide scan is slower and
+// ambiguous. An unloaded module gives an empty pattern, never a scan of whatever else is mapped.
+//
+// One wildcard byte is one "?" - Hooking.Patterns counts each question mark as a byte, so "??" is
+// two wildcards and never matches.
 export inline hook::pattern module_pattern(const wchar_t* module_name, std::string_view bytes)
 {
     auto hModule = GetModuleHandleW(module_name);
     return hModule ? hook::module_pattern(hModule, bytes) : hook::pattern();
 }
 
-// A byte patch that can be put back. Settings are live, so every patch has to be reversible at
-// any moment, from any thread.
+// Settings are live, so every patch has to be reversible at any moment, from any thread.
 export class raw_mem
 {
 public:
@@ -316,8 +317,8 @@ public:
     size_t Size() const { return old_code.size(); }
 
 private:
-    // injector's scoped_unprotect has no locking of its own. The ini watcher runs on its own
-    // thread and can re-apply a patch while the engine thread is applying the same one.
+    // injector's scoped_unprotect does no locking, and the ini watcher thread can re-apply a
+    // patch while the engine thread is applying the same one.
     //
     // ponytail: one lock for all patches. Split it only if patch writes ever get hot.
     static inline std::mutex mtx;

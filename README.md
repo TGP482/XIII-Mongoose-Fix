@@ -28,12 +28,16 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 - **Mouse Sensitivity** - Adjusts mouse sensitivity, which the game has no option for.
 - **Mouse Smoothing** - Removes the engine's mouse smoothing, which swallows fast movement.
 
+### Interface
+- **Skip Intro Movies** - Skips the ubi, alien and nvidia logo movies the exe plays before the menu.
+
 ### Field of View
 - **Field of View** - Adjusts the field of view from the game's 85 default, range: 45 - 145. Weapon zoom and scopes keep their magnification.
 
 ### Mongoose Fixes
-- Added raw mouse input, fixing mouse movement changing with your polling rate.
+- Fixed mouse movement breaking with high polling rates and removed the deadzone.
 - Fixed an issue where mouse sensitivity changed with the field of view.
+- Fixed HUD elements, menus, blur effects and comic panels not scaling properly with resolution.
 
 ### Credits
 - [ThirteenAG](https://github.com/ThirteenAG) - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)

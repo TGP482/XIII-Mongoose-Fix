@@ -11,6 +11,11 @@ import fov;
 import maxfps;
 import rawmouse;
 import comicpanels;
+import blurfix;
+import menuscale;
+import hudscale;
+import introskip;
+import exitfix;
 import updatecheck;
 
 void Init()
@@ -29,6 +34,9 @@ extern "C"
             CallbackHandler::RegisterCallback(Init);
             CallbackHandler::RegisterCallback(L"Engine.dll", []() { MongooseFix::onEngineInitEvent().executeAll(); });
             CallbackHandler::RegisterCallback(L"D3DDrv.dll", []() { MongooseFix::onD3DDrvInitEvent().executeAll(); });
+            CallbackHandler::RegisterCallback(L"GUI.dll", []() { MongooseFix::onGUIInitEvent().executeAll(); });
+            CallbackHandler::RegisterCallback(L"Core.dll", []() { MongooseFix::onCoreInitEvent().executeAll(); });
+            CallbackHandler::RegisterCallback(L"WinDrv.dll", []() { MongooseFix::onWinDrvInitEvent().executeAll(); });
         });
     }
 }

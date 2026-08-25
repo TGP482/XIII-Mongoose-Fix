@@ -8,49 +8,55 @@ import common;
 import settings;
 import logging;
 
-// What is actually wrong with the mouse:
+// The engine reads the mouse through DirectInput one buffered packet at a time, one input event
+// each, then runs it through UPlayerInput::SmoothMouse - a half-and-half filter with a borrow
+// term, a 0.07s decay tail, and a clamp of the smoothed value to +/-1 that eats fast movement, so
+// flicks go nowhere and the feel follows the polling rate. So the deltas come from raw input
+// instead, one sum per frame, written over what DirectInput accumulated, and the filter is jumped
+// over its own body.
 //
-// The engine reads it through DirectInput one buffered packet at a time and fires a separate
-// input event for each, so how the frame's movement is put together depends on how many packets
-// the mouse sent. Everything then goes through UPlayerInput::SmoothMouse, a half-and-half filter
-// with a borrow term, a decay tail that keeps moving the view for up to 0.07s after the mouse
-// has stopped, and - the part that hurts - a clamp of the smoothed value to +/-1. Move the mouse
-// quickly and the clamp eats the difference, which is why fast flicks go nowhere and why the
-// feel changes with the polling rate.
-//
-// So: take the deltas from raw input instead, where one frame is one summed delta whatever the
-// polling rate, write that in place of what DirectInput accumulated, and jump the smoothing
-// filter over its own body so the clamp and the tail never run.
-//
-// UPlayerInput +0x30 is the APlayerController it lives within. On the controller,
-// aMouseX is +0x34C and aMouseY is +0x350.
+// UPlayerInput +0x30 is its APlayerController; aMouseX +0x34C, aMouseY +0x350.
 static constexpr auto nOffsetPlayerController = 0x30;
 static constexpr auto nOffsetMouseX = 0x34C;
 static constexpr auto nOffsetMouseY = 0x350;
 
-// UInput::ReadInput multiplies every axis by 20/DeltaTime before the input event runs, and the
-// script that consumes aTurn multiplies by DeltaTime again. The two cancel, which is what makes
-// the stock look speed frame rate independent. Raw deltas go in with the same factor applied, so
-// a sensitivity of 1.0 feels exactly like the game does now, only without the clamp.
+// UInput::ReadInput multiplies every axis by 20/DeltaTime and the script consuming aTurn
+// multiplies by DeltaTime again, which is what makes look speed frame rate independent. Raw deltas
+// go in with the same factor, so 1.0 matches the stock feel.
 static constexpr auto fEngineAxisScale = 20.0f;
 
-// Not a setting. The only thing that clears it is raw input failing to come up, which falls the
-// game back on its own DirectInput path rather than leaving the mouse dead.
+// UGUIController::NativeKeyEvent in GUI.dll moves the menu cursor itself, one packet at a time:
+//
+//   MouseX = (int)((float)(int)(Delta - 0.5) * MenuMouseSens + MouseX)
+//
+// The 0.5 is a deadzone: a single-count packet lands on 0.5, rounds to nearest even and moves the
+// cursor not at all, and packet size follows the polling rate. Dropping the subtraction leaves the
+// count alone; the deltas come from raw input here too.
+static constexpr auto nKeyMouseX = 0xE4;
+static constexpr auto nKeyMouseY = 0xE5;
+
+// Not a setting - only cleared by raw input failing to come up, which falls back on DirectInput
+// rather than leaving the mouse dead.
 static std::atomic<bool> bRawMouseInput = true;
 static std::atomic<float> fMouseSensitivity = 1.0f;
 
 static std::atomic<int32_t> nAccumulatedX = 0;
 static std::atomic<int32_t> nAccumulatedY = 0;
 
+// The menu drains its own pair: same messages, different moments, so sharing would lose movement.
+static std::atomic<int32_t> nMenuAccumulatedX = 0;
+static std::atomic<int32_t> nMenuAccumulatedY = 0;
+
 static HWND hGameWindow = nullptr;
 static WNDPROC pOriginalWndProc = nullptr;
 
 static SafetyHookInline shDealWithPlayerInputEvent{};
+static SafetyHookInline shNativeKeyEvent{};
 
-// Written while the setting is off, restored while it is on, so the filter can be switched back
-// and forth mid game.
+// Written while the setting is off, restored while it is on.
 static std::unique_ptr<raw_mem> patchSkipSmoothing;
 static std::unique_ptr<raw_mem> patchNoFovScaling;
+static std::vector<std::unique_ptr<raw_mem>> patchNoMenuDeadzone;
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT nMessage, WPARAM wParam, LPARAM lParam)
 {
@@ -65,15 +71,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT nMessage, WPARAM wParam, LPARAM 
         {
             nAccumulatedX += input.data.mouse.lLastX;
             nAccumulatedY += input.data.mouse.lLastY;
+            nMenuAccumulatedX += input.data.mouse.lLastX;
+            nMenuAccumulatedY += input.data.mouse.lLastY;
         }
     }
 
     return CallWindowProcW(pOriginalWndProc, hWnd, nMessage, wParam, lParam);
 }
 
-// FindWindowEx walks every top-level window on the desktop, not this process's, and the viewport
-// class name belongs to every Unreal Engine 2 game. Without the process check a second copy of the
-// game, or any other UE2 title, is a window we would try and fail to subclass.
+// FindWindowEx walks the whole desktop and the class name belongs to every UE2 game, hence the
+// process check.
 static HWND FindViewportWindow()
 {
     for (HWND hWindow = nullptr; (hWindow = FindWindowExA(nullptr, hWindow, "WWindowsViewportWindow", nullptr)) != nullptr; )
@@ -88,7 +95,7 @@ static HWND FindViewportWindow()
     return nullptr;
 }
 
-// Deferred until the first frame of input: the window does not exist while the asi is loading.
+// Deferred to the first frame of input: the window does not exist while the asi is loading.
 static bool EnsureRawInput()
 {
     if (hGameWindow)
@@ -108,8 +115,8 @@ static bool EnsureRawInput()
 
     hGameWindow = hWindow;
 
-    // No RIDEV_INPUTSINK on purpose: without it the game stops receiving movement the moment it
-    // loses focus, which is the behaviour anyone alt-tabbing expects.
+    // No RIDEV_INPUTSINK on purpose: without it movement stops the moment the game loses focus,
+    // which is what anyone alt-tabbing expects.
     RAWINPUTDEVICE device{};
     device.usUsagePage = 0x01;
     device.usUsage = 0x02;
@@ -141,8 +148,7 @@ static void __fastcall DealWithPlayerInputEvent(uint8_t* pThis, void*, float fDe
             const auto nY = nAccumulatedY.exchange(0);
             const auto fScale = fMouseSensitivity.load() * (fEngineAxisScale / fDeltaTime);
 
-            // Y is negated because the engine's own mouse path negates it: raw input counts down
-            // as positive, the view axis counts up as positive.
+            // The engine's own path negates Y: raw input counts down as positive.
             *reinterpret_cast<float*>(pController + nOffsetMouseX) = static_cast<float>(nX) * fScale;
             *reinterpret_cast<float*>(pController + nOffsetMouseY) = static_cast<float>(-nY) * fScale;
         }
@@ -167,7 +173,7 @@ static void InitEngine()
     shDealWithPlayerInputEvent = safetyhook::create_inline(pDealWith, DealWithPlayerInputEvent);
 
     // MOV AL,[ECX+0x28] / TEST AL,1 - the bMaxMouseSmoothing test at the top of SmoothMouse, and
-    // the pass through tail it should be going to instead.
+    // the pass through tail to jump to instead.
     auto patternSmoothingTest = module_pattern(L"Engine.dll", "8A 41 28 A8 01 74 41 D9 44 24 08 D8 1D");
     auto patternPassThrough = module_pattern(L"Engine.dll", "8B 4C 24 08 8B 44 24 14 89 0A C7 00 00 00 00 00");
 
@@ -178,7 +184,7 @@ static void InitEngine()
         const auto nRelative = static_cast<int32_t>(nTo - (nFrom + 5));
         const auto pRelative = reinterpret_cast<const uint8_t*>(&nRelative);
 
-        // The test is five bytes, a near jump is five bytes. Nothing has to move.
+        // Test and near jump are both five bytes, so nothing moves.
         patchSkipSmoothing = std::make_unique<raw_mem>(reinterpret_cast<void*>(nFrom),
             std::initializer_list<uint8_t>{ 0xE9, pRelative[0], pRelative[1], pRelative[2], pRelative[3] });
     }
@@ -187,11 +193,10 @@ static void InitEngine()
         LogWarn("RawMouseInput: smoothing pattern not found, MouseSmoothing does nothing");
     }
 
-    // FLD [ESI+0x3AC] (DesiredFOV) / FMUL qword [0.01111] - the mouse being scaled by the field of
-    // view, so widening the FOV quietly raises sensitivity. FLD1 in its place leaves the rest of
-    // the function reading a factor of one. Not a setting: nobody wants their sensitivity tied to
-    // their FOV.
-    auto patternFovScale = module_pattern(L"Engine.dll", "D9 86 AC 03 00 00 DC 0D ?? ?? ?? ?? 8B 46 7C");
+    // FLD [ESI+0x3AC] (DesiredFOV) / FMUL qword [0.01111] - the mouse scaled by field of view, so
+    // widening the FOV quietly raises sensitivity. FLD1 in its place leaves the rest of the
+    // function reading a factor of one. Not a setting.
+    auto patternFovScale = module_pattern(L"Engine.dll", "D9 86 AC 03 00 00 DC 0D ? ? ? ? 8B 46 7C");
     if (!patternFovScale.empty())
     {
         patchNoFovScaling = std::make_unique<raw_mem>(patternFovScale.get_first(0),
@@ -212,9 +217,51 @@ static void InitEngine()
     });
 }
 
-// Runs from DLL_PROCESS_DETACH, under the loader lock, on a window that may already be gone. The
-// raw input registration is worth giving back either way; the window procedure is only put back
-// if it is still ours, because writing over whatever subclassed after us is worse than leaving it.
+// Each axis arrives as its own event and gets what has been summed since the last one of that
+// axis. Y is negated as in game; the handler subtracts what it is given from the cursor's Y.
+static int __fastcall NativeKeyEvent(uint8_t* pThis, void*, uint8_t* pKey, uint8_t* pState, float fDelta)
+{
+    if (bRawMouseInput && pKey && EnsureRawInput())
+    {
+        if (*pKey == nKeyMouseX)
+            fDelta = static_cast<float>(nMenuAccumulatedX.exchange(0));
+        else if (*pKey == nKeyMouseY)
+            fDelta = static_cast<float>(-nMenuAccumulatedY.exchange(0));
+    }
+
+    return shNativeKeyEvent.fastcall<int>(pThis, nullptr, pKey, pState, fDelta);
+}
+
+static void InitGUI()
+{
+    auto hGUI = GetModuleHandleW(L"GUI.dll");
+    if (!hGUI)
+        return;
+
+    if (auto p = GetProcAddress(hGUI, "?NativeKeyEvent@UGUIController@@UAEHAAE0M@Z"))
+        shNativeKeyEvent = safetyhook::create_inline(p, NativeKeyEvent);
+    else
+        LogWarn("RawMouseInput: GUI.dll did not export NativeKeyEvent, the menu cursor is untouched");
+
+    // FLD [ESP+0x28] (the axis delta) / FSUB [0.5] - once per axis. Not a setting: the deadzone
+    // eats the smallest movement the mouse can report.
+    auto patternDeadzone = module_pattern(L"GUI.dll", "D9 44 24 28 D8 25 ? ? ? ? DB 5C 24");
+    if (patternDeadzone.empty())
+    {
+        LogWarn("RawMouseInput: menu cursor deadzone pattern not found, the deadzone is still there");
+        return;
+    }
+
+    for (size_t i = 0; i < patternDeadzone.size(); i++)
+    {
+        patchNoMenuDeadzone.emplace_back(std::make_unique<raw_mem>(patternDeadzone.get(i).get<void>(4),
+            std::initializer_list<uint8_t>{ 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }));
+        patchNoMenuDeadzone.back()->Write();
+    }
+}
+
+// From DLL_PROCESS_DETACH, under the loader lock, on a window that may already be gone. The window
+// procedure only goes back if it is still ours - overwriting a later subclass is worse.
 static void Shutdown()
 {
     RAWINPUTDEVICE device{};
@@ -237,6 +284,7 @@ public:
     RawMouse()
     {
         MongooseFix::onEngineInitEvent() += []() { InitEngine(); };
+        MongooseFix::onGUIInitEvent() += []() { InitGUI(); };
         MongooseFix::onShutdownEvent() += []() { Shutdown(); };
     }
 } RawMouse;

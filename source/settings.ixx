@@ -20,13 +20,13 @@ export enum Pref
     PREF_FIELDOFVIEW,
     PREF_COMICPANELSCALING,
     PREF_COMICPANELSCALE,
+    PREF_SKIPINTROMOVIES,
 
     COUNT,
 };
 
-// The value the ini shipped with for FieldOfView, and the value the game's own script uses as
-// its base. Anything derived from FOV (weapon zoom levels, the viewmodel offset) is authored
-// against this number, so it is the reference the FOV module scales from.
+// The script's FOV base. Weapon zoom levels and the viewmodel offset are authored against it, so
+// it is what the FOV module scales from.
 export inline constexpr auto fStockFieldOfView = 85.0f;
 
 export class CSettings
@@ -40,8 +40,7 @@ public:
     {
         CIniReader iniReader("");
 
-        // 0 on either axis means "whatever the desktop is", which is what almost everyone wants
-        // and what the game cannot work out for itself.
+        // 0 on either axis means "whatever the desktop is".
         auto nResolutionX = iniReader.ReadInteger("Display", "ResolutionX", 0);
         auto nResolutionY = iniReader.ReadInteger("Display", "ResolutionY", 0);
         mPrefs[PREF_RESOLUTIONX] = nResolutionX < 1 ? 0 : std::clamp(nResolutionX, 320, 16384);
@@ -49,8 +48,8 @@ public:
 
         mPrefs[PREF_VSYNC] = std::clamp(iniReader.ReadInteger("Display", "VSync", 1), 0, 1);
 
-        // 0 unlocks. Anything above 0 is handed to the engine's own tick rate governor, which
-        // is a sleep rather than a spin, so a cap is cheaper than none.
+        // 0 unlocks. Anything else goes to the engine's tick rate governor, which sleeps rather
+        // than spins, so a cap is cheaper than none.
         mPrefs[PREF_MAXFRAMERATE] = std::clamp(iniReader.ReadInteger("Display", "MaxFrameRate", 0), 0, 9999);
 
         mPrefs[PREF_ANISOTROPICFILTERING] = std::clamp(iniReader.ReadInteger("Graphics", "AnisotropicFiltering", 16), 0, 16);
@@ -64,11 +63,13 @@ public:
 
         mPrefs[PREF_COMICPANELSCALING] = std::clamp(iniReader.ReadInteger("Interface", "ComicPanelScaling", 1), 0, 2);
 
-        // 0 asks for the factor to be worked out from the height the art was drawn for.
+        // 0 derives the factor from the height the art was drawn for.
         auto fComicPanelScale = iniReader.ReadFloat("Interface", "ComicPanelScale", 0.0f);
         mPrefs[PREF_COMICPANELSCALE] = fComicPanelScale <= 0.0f ? 0.0f : std::clamp(fComicPanelScale, 0.25f, 4.0f);
 
-        // The watcher is what makes every setting live. It is installed once, on the first read.
+        mPrefs[PREF_SKIPINTROMOVIES] = std::clamp(iniReader.ReadInteger("Interface", "SkipIntroMovies", 1), 0, 1);
+
+        // Installed once, on the first read; what makes every setting live.
         static std::once_flag flag;
         std::call_once(flag, [&]()
         {
@@ -94,8 +95,7 @@ public:
     void SetFloat(Pref name, float value) { mPrefs[name] = value; }
 } MongooseFixSettings;
 
-// Reading a setting into a variable now and on every re-read is what nearly every module wants
-// to do with nearly every setting, so it is one call. T covers plain and atomic destinations.
+// T covers plain and atomic destinations.
 export template<class T>
 void BindBool(T& target, Pref pref)
 {
