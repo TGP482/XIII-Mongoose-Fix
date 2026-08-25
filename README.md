@@ -1,5 +1,5 @@
 # XIII: Mongoose Fix
-<img width="6500" height="8500" alt="image (7)" src="https://github.com/user-attachments/assets/7bf18131-8965-4962-89f3-733b09dedf0d" />
+<img width="1280" alt="XIII Mongoose Fix" src="https://github.com/user-attachments/assets/7ac9050d-7654-48ea-9f21-1a66f37d4412" />
 
 ## Installation
 The latest version of [XIII: Mongoose Fix](https://github.com/TGP482/XIII-Mongoose-Fix/releases) can be found in the Releases page.
