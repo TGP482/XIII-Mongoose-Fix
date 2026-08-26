@@ -87,9 +87,22 @@ static constexpr auto fAuthoredBandHeight = 118.0f;
 static bool bBandDrawn = false;
 static float fBandHeight = 0.0f;
 
+// Thread local: the loading thread animates while the main thread still draws. A shared flag
+// scales the menu too. Above one only inside the pass, so flag and scale in one.
+static thread_local float fLoadingScale = 1.0f;
+
 static void DrawTile(SafetyHookContext& ctx)
 {
     auto pCorners = reinterpret_cast<float*>(ctx.esp + nOffsetArgX1);
+
+    if (fLoadingScale > 1.0f)
+    {
+        pCorners[0] *= fLoadingScale;
+        pCorners[1] *= fLoadingScale;
+        pCorners[2] *= fLoadingScale;
+        pCorners[3] *= fLoadingScale;
+        return;
+    }
 
     // Virtual coordinates, so the quad moves as well as grows.
     if (bHudPass.load())
@@ -205,6 +218,11 @@ static void AddOrigin(SafetyHookContext& ctx)
 {
     auto pCanvas = reinterpret_cast<uint8_t*>(ctx.ecx);
     if (!pCanvas)
+        return;
+
+    // Loading screen sets no origin, so it would inherit the last menu's pillarbox, in virtual
+    // units, and land a screen over.
+    if (fLoadingScale > 1.0f)
         return;
 
     auto pX = reinterpret_cast<float*>(ctx.esp + nOffsetArgX);
@@ -651,6 +669,74 @@ static void RestoreBox(uint8_t* pCanvas, const CanvasBox& saved)
     *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY) = saved.nSizeY;
 }
 
+// Loading thread draws to the viewport's canvas, laid out against 640x480 like the HUD: 50 pixel
+// sprites, caption 240 in from the right edge and 65 up from the bottom, font as authored.
+//
+// Writes nothing shared, canvas and viewport included. The thread runs mid load, so anything it
+// changes gets read by the engine and kept. Quads are multiplied on the way out; the two screen
+// pixel inputs, spawn bounds and caption corner, are divided where they are read.
+static constexpr auto nOffsetEngineClient = 0x4C;
+static constexpr auto nOffsetClientViewports = 0x2C;
+static constexpr auto nOffsetViewportCanvas = 0x68;
+static constexpr auto nOffsetCurX = 0x44;
+static constexpr auto nOffsetCurY = 0x48;
+
+static SafetyHookInline shRenderAnimation{};
+static SafetyHookMid mhSpawnBoundX{};
+static SafetyHookMid mhSpawnBoundY{};
+static SafetyHookMid mhCaptionPosition{};
+
+// At the CDQ, with the viewport size still in ECX and its margin not yet taken off.
+static void SpawnBound(SafetyHookContext& ctx)
+{
+    if (fLoadingScale > 1.0f)
+        ctx.ecx = static_cast<uintptr_t>(ctx.ecx / fLoadingScale);
+}
+
+// Pen is stored by now, ClipX - 240 and ClipY - 65 in screen pixels. Margins grow with the quads,
+// so keep them and divide the screen.
+static void CaptionPosition(SafetyHookContext& ctx)
+{
+    if (fLoadingScale <= 1.0f)
+        return;
+
+    auto pCanvas = reinterpret_cast<uint8_t*>(ctx.ebp);
+
+    auto pCurX = reinterpret_cast<float*>(pCanvas + nOffsetCurX);
+    auto pCurY = reinterpret_cast<float*>(pCanvas + nOffsetCurY);
+
+    const auto fClipX = *reinterpret_cast<float*>(pCanvas + nOffsetClipX);
+    const auto fClipY = *reinterpret_cast<float*>(pCanvas + nOffsetClipY);
+
+    *pCurX = fClipX / fLoadingScale - (fClipX - *pCurX);
+    *pCurY = fClipY / fLoadingScale - (fClipY - *pCurY);
+}
+
+static void __fastcall RenderAnimation(uint8_t* pThis, void*, uint8_t* pEngine)
+{
+    auto pClient = pEngine ? *reinterpret_cast<uint8_t**>(pEngine + nOffsetEngineClient) : nullptr;
+    auto ppViewports = pClient ? *reinterpret_cast<uint8_t***>(pClient + nOffsetClientViewports) : nullptr;
+    const auto nViewports = pClient
+        ? *reinterpret_cast<int32_t*>(pClient + nOffsetClientViewports + sizeof(void*)) : 0;
+
+    auto pViewport = (ppViewports && nViewports > 0) ? ppViewports[0] : nullptr;
+    auto pCanvas = pViewport ? *reinterpret_cast<uint8_t**>(pViewport + nOffsetViewportCanvas) : nullptr;
+
+    const auto fClipY = pCanvas ? *reinterpret_cast<float*>(pCanvas + nOffsetClipY) : 0.0f;
+
+    if (fClipY <= fAuthoredHeight)
+    {
+        shRenderAnimation.thiscall<void>(pThis, pEngine);
+        return;
+    }
+
+    fLoadingScale = fClipY / fAuthoredHeight;
+
+    shRenderAnimation.thiscall<void>(pThis, pEngine);
+
+    fLoadingScale = 1.0f;
+}
+
 static void __fastcall GuiPreRender(uint8_t* pMaster, void*, uint8_t* pCanvas)
 {
     if (!pCanvas)
@@ -840,6 +926,32 @@ static void InitEngine()
 
     if (!shCanvasDrawTile)
         LogWarn("HudScale: UCanvas::DrawTile could not be hooked, the menu's full width bars stop at the pillarbox");
+
+    if (auto pRenderAnimation = GetProcAddress(hEngine,
+        "?RenderAnimation@UEngLoadingAnimationThread@@UAEXPAVUEngine@@@Z"))
+        shRenderAnimation = safetyhook::create_inline(pRenderAnimation, RenderAnimation);
+
+    // MOV ECX,[EBX+0x88] / CDQ / SUB ECX,300, and SizeY with 200: where a sprite grows from.
+    auto patternSpawnX = module_pattern(L"Engine.dll", "8B 8B 88 00 00 00 99 81 E9 2C 01 00 00 F7 F9");
+    auto patternSpawnY = module_pattern(L"Engine.dll", "8B 8B 8C 00 00 00 99 81 E9 C8 00 00 00 F7 F9");
+
+    // FLD ClipX / FSUB 240 / FSTP CurX and the same for ClipY and 65: the caption's corner.
+    auto patternCaption = module_pattern(L"Engine.dll",
+        "D9 45 3C 8D 54 24 20 D8 25 ? ? ? ? 52 6A 00 D9 5D 44 D9 45 40 D8 25 ? ? ? ? D9 5D 48 C7 45 58");
+
+    if (!patternSpawnX.empty() && !patternSpawnY.empty() && !patternCaption.empty())
+    {
+        mhSpawnBoundX = safetyhook::create_mid(patternSpawnX.get_first(6), SpawnBound);
+        mhSpawnBoundY = safetyhook::create_mid(patternSpawnY.get_first(6), SpawnBound);
+        mhCaptionPosition = safetyhook::create_mid(patternCaption.get_first(31), CaptionPosition);
+    }
+
+    // Scaled quads with an unscaled spawn point or corner land off screen. All or none.
+    if (!mhSpawnBoundX || !mhSpawnBoundY || !mhCaptionPosition)
+        shRenderAnimation = {};
+
+    if (!shRenderAnimation)
+        LogWarn("HudScale: the loading animation was not found, the loading screen stays 640x480");
 
     if (auto pDrawLine = GetProcAddress(hEngine, "?DrawLine@FCanvasUtil@@QAEXMMMMVFColor@@W4ERenderStyle@@@Z"))
         shDrawLine = safetyhook::create_inline(pDrawLine, DrawLine);

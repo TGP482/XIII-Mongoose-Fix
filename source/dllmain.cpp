@@ -18,6 +18,7 @@ import crashdump;
 import blurfix;
 import menuscale;
 import hudscale;
+import fmv;
 import introskip;
 import exitfix;
 import updatecheck;

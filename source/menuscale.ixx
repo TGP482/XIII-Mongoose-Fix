@@ -495,6 +495,66 @@ static constexpr auto nCopyLength = 11;
 static constexpr auto nOrgYStatement = 2;
 static constexpr auto nOrgXStatement = 3;
 
+// A message box's size never left 640x480. Half the pages hand InitBox raw numbers, half multiply
+// by fRatioX, and the box is screen pixels now, so the raw ones stay a sixth of their size at 4K:
+// "This profile already exists" comes out one word to a line. A call site cannot tell the two
+// units apart. The parameters are copied out one statement each, so every read of the four size
+// ones becomes a constant the resolution drives. One size for every box, within a fifth of what
+// the pages already use, and InternalOnPreDraw still grows the height to fit the message.
+static constexpr auto fMsgBoxWidth = 400.0f;
+static constexpr auto fMsgBoxHeight = 230.0f;
+static constexpr auto fMsgBoxMargin = 10.0f;
+
+// InitBox's opening copies, in order: _Width, _Height, _OrgY, _OrgX, _LineWidth, _LineHeight.
+static constexpr int aSizeStatement[] = { 0, 1, 4, 5 };
+static constexpr float aSizeAuthored[] = { fMsgBoxWidth, fMsgBoxHeight, fMsgBoxMargin, fMsgBoxMargin };
+static constexpr auto nSizeStatements = 6;
+
+static int NormaliseMsgBox(uint8_t* pScript, int nSize)
+{
+    for (auto n = 0; n < nSizeStatements; n++)
+    {
+        auto p = pScript + n * nCopyLength;
+
+        if ((n + 1) * nCopyLength > nSize || p[0] != nLet || p[1] != nInstanceVariable
+            || p[6] != nLocalVariable)
+            return 0;
+    }
+
+    uint32_t aParam[std::size(aSizeStatement)]{};
+
+    for (size_t n = 0; n < std::size(aSizeStatement); n++)
+        std::memcpy(&aParam[n], pScript + aSizeStatement[n] * nCopyLength + 7, sizeof(uint32_t));
+
+    auto nCount = 0;
+
+    for (auto i = 0; i + nConstSize <= nSize; i++)
+    {
+        if (pScript[i] != nLocalVariable)
+            continue;
+
+        for (size_t n = 0; n < std::size(aParam); n++)
+        {
+            if (std::memcmp(pScript + i + 1, &aParam[n], sizeof(uint32_t)) != 0)
+                continue;
+
+            injector::WriteMemoryRaw(pScript + i, const_cast<uint8_t*>(FloatConst(0.0f).aBytes),
+                nConstSize, true);
+
+            {
+                std::lock_guard g(mtxSites);
+                AddSite(pScript + i, Live::Pixels, true, aSizeAuthored[n]);
+            }
+
+            i += nConstSize - 1;
+            nCount++;
+            break;
+        }
+    }
+
+    return nCount;
+}
+
 static int CentreInitBox(uint8_t* pScript, int nSize)
 {
     uint32_t aOrg[2]{};
@@ -1166,6 +1226,15 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
 
     if (std::strstr(szFullName, ".XIIIMsgBoxInGame.InitBox"))
         nTotal += CentreInitBox(pScript, nSize);
+
+    // The offsets InitBox insets its own controls by are raw pixels too.
+    if (std::strstr(szFullName, ".XIIIMsgBox.InitBox"))
+    {
+        nTotal += NormaliseMsgBox(pScript, nSize);
+
+        for (const uint8_t nPixels : { 10, 30, 35 })
+            nTotal += RecordPixels(pScript, nSize, nPixels);
+    }
 
     // Caret under the name being typed, and the dots at each end when the text is trimmed: raw
     // pixels, a couple of texels wide at any resolution. Every float constant here is one of
