@@ -61,6 +61,7 @@ static constexpr auto nOffsetArgY = 0x0C;
 static constexpr int aOriginBlindSlots[] = { 0x84, 0x88, 0xA4, 0xA8, 0xAC, 0xB0 };
 static SafetyHookMid amhOriginBlind[std::size(aOriginBlindSlots)]{};
 static SafetyHookMid mhDrawTile{};
+static SafetyHookMid mhDrawTriangle{};
 static SafetyHookMid mhCharSize{};
 
 // Set for the length of the HUD pass; atomic because the ini watcher reads the scale.
@@ -112,6 +113,20 @@ static void DrawTile(SafetyHookContext& ctx)
         pCorners[2] = fStringX + (pCorners[2] - fStringX) * fScale;
         pCorners[3] = fStringY + (pCorners[3] - fStringY) * fScale;
     }
+}
+
+// UCanvas::DrawFrame lays the comic border out as triangles, the one HUD primitive that is not a
+// tile, so it stayed at the virtual canvas size. Its corners are the first six stack floats.
+static void DrawTriangle(SafetyHookContext& ctx)
+{
+    if (!bHudPass.load())
+        return;
+
+    const auto fScale = fHudScale.load();
+    auto pCorners = reinterpret_cast<float*>(ctx.esp + nOffsetArgX1);
+
+    for (auto i = 0; i < 6; i++)
+        pCorners[i] *= fScale;
 }
 
 // Box outlines are line strokes, one pixel wide however large the box, and there is no width to
@@ -768,6 +783,13 @@ static void InitEngine()
         LogWarn("HudScale: the HUD pass could not be hooked, the HUD stays at its texture size");
         return;
     }
+
+    if (auto pDrawTriangle = GetProcAddress(hEngine,
+        "?DrawTriangle@FCanvasUtil@@QAEXMMMMMMMMMMMPAVUMaterial@@VFColor@@@Z"))
+        mhDrawTriangle = safetyhook::create_mid(pDrawTriangle, DrawTriangle);
+
+    if (!mhDrawTriangle)
+        LogWarn("HudScale: FCanvasUtil::DrawTriangle could not be hooked, the comic border stays 640x480");
 
     auto pGuiPreRender = GetProcAddress(hEngine, "?MasterProcessPreRender@UInteractionMaster@@QAEXPAVUCanvas@@@Z");
     auto pGuiPostRender = GetProcAddress(hEngine, "?MasterProcessPostRender@UInteractionMaster@@QAEXPAVUCanvas@@@Z");
