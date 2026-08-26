@@ -160,9 +160,11 @@ static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pR
     if (!bGuiPass.load() || !pCanvas)
         return;
 
-    // A message box's geometry is in pixels, but like every window it sets the origin from WinLeft
-    // as a fraction of the page - 990 gives 2,851,680. Harmless until the seven draws started
-    // honouring the origin. Its children carry absolute positions, so zero is right.
+    // A message box's geometry is pixels, but like every window it sets the origin from WinLeft as
+    // a fraction of the page - 990 gives 2,851,680. Harmless until the seven draws began honouring
+    // the origin. Panel, backdrop, controls and captions are all absolute screen pixels, so zero
+    // is right: anything else moves the ones that read the origin and strands the captions, which
+    // do not.
     auto pOrgX = reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
     auto pOrgY = reinterpret_cast<float*>(pCanvas + nOffsetOrgY);
     const auto fLimit = (std::max)(fRealClipX.load(), *reinterpret_cast<float*>(pCanvas + nOffsetClipX));
@@ -176,6 +178,11 @@ static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pR
 
 // Set for one execDrawMsgboxBackground; the first quad says which caller it is.
 static bool bMsgboxPass = false;
+
+// The framework's white backdrop under a message box is the rectangle the panel then draws over,
+// but it goes down before the box sets an origin, so it takes the page's and lands a pillarbox
+// right. Same rectangle every frame, so the panel names it.
+static float aMsgboxPanel[4]{};
 static int nMsgboxQuad = 0;
 static bool bMsgboxSelfPlaced = false;
 
@@ -188,33 +195,39 @@ static void AddOrigin(SafetyHookContext& ctx)
     auto pX = reinterpret_cast<float*>(ctx.esp + nOffsetArgX);
     auto pY = reinterpret_cast<float*>(ctx.esp + nOffsetArgY);
 
-    // A message box's WinLeft already carries the pillarbox, so no second copy. First quad tells
-    // the callers apart: the pause menu's is a page-wide surround bar, a message box suppresses
-    // those and leads with the panel.
+    // First quad tells the callers apart: the pause menu's is a page-wide surround bar, a message
+    // box suppresses those and leads with the panel.
+    auto pXL = reinterpret_cast<float*>(ctx.esp + nOffsetArgX + 8);
+    auto pYL = reinterpret_cast<float*>(ctx.esp + nOffsetArgY + 8);
+
     if (bMsgboxPass)
     {
         if (nMsgboxQuad == 0)
         {
-            const auto fXL = *reinterpret_cast<float*>(ctx.esp + nOffsetArgX + 8);
             const auto fClipX = *reinterpret_cast<float*>(pCanvas + nOffsetClipX);
 
-            bMsgboxSelfPlaced = fXL < fClipX * 0.9f;
+            bMsgboxSelfPlaced = *pXL < fClipX * 0.9f;
+
+            if (bMsgboxSelfPlaced)
+            {
+                aMsgboxPanel[0] = *pX;
+                aMsgboxPanel[1] = *pY;
+                aMsgboxPanel[2] = *pXL;
+                aMsgboxPanel[3] = *pYL;
+            }
         }
 
         nMsgboxQuad++;
 
-        // The background behind it drew against the page's origin, so the panel, drawing against
-        // the zeroed one, is handed the same offset directly.
+        // Geometry is screen coordinates now - menuscale centres the box there, since the GUI
+        // natives drawing its caption and buttons read WinLeft straight - so no offset here.
         if (bMsgboxSelfPlaced)
-        {
-            const auto fBox = fAuthoredWidth * fGuiScale.load();
-            const auto fScreen = fRealClipX.load();
-
-            if (bGuiClamped.load() && fScreen > fBox)
-                *pX += (fScreen - fBox) * 0.5f;
-
             return;
-        }
+    }
+    else if (aMsgboxPanel[2] > 0.0f && *pX == aMsgboxPanel[0] && *pY == aMsgboxPanel[1]
+        && *pXL == aMsgboxPanel[2] && *pYL == aMsgboxPanel[3])
+    {
+        return;
     }
 
     *pX += *reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
@@ -671,6 +684,7 @@ static void __fastcall GuiPostRender(uint8_t* pMaster, void*, uint8_t* pCanvas)
 
 static void __fastcall HudPostRender(uint8_t* pHud, void*, uint8_t* pCanvas)
 {
+
     // The HUD lays out against the whole screen, so inside the interface pass the real values go
     // back for its length.
     const auto bRestoreBox = pCanvas && bGuiClamped.load();

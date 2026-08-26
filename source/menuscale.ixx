@@ -44,6 +44,11 @@ static constexpr auto nOffsetScriptNum = 0x4C;
 static constexpr auto fAuthoredWidth = 640.0f;
 static constexpr auto fAuthoredHeight = 480.0f;
 
+// Where every PC message box opens, in 640x480 units. Not page centre - the pause panel uses the
+// same corner and both must agree.
+static constexpr auto fMsgBoxOrgX = 220.0f;
+static constexpr auto fMsgBoxOrgY = 130.0f;
+
 // EX_IntConst 0x1D, EX_FloatConst 0x1E, each plus four little endian bytes. Which one a literal
 // became is not obvious from the source - 800 in float arithmetic folds to a float, the 800 in
 // "C.ClipX > 800" stays an int behind a cast - so both are looked for.
@@ -96,6 +101,10 @@ enum class Live
     MenuWidth,
     MenuHeight,
     Pixels,
+    ScreenWidth,
+    ScreenHeight,
+    MsgBoxLeft,
+    MsgBoxTop,
 };
 
 struct Site
@@ -148,6 +157,17 @@ static void ApplyLiveSites()
             fValue = std::clamp(2.0f * fAuthoredHeight * fScale - nHeight, 0.0f, fAuthoredHeight * fScale);
             break;
         case Live::Pixels:     fValue = site.fAuthored * fScale; break;
+
+        case Live::ScreenWidth:  fValue = static_cast<float>(nWidth); break;
+        case Live::ScreenHeight: fValue = static_cast<float>(nHeight); break;
+
+        // Authored corner plus the pillarbox the GUI natives never apply.
+        case Live::MsgBoxLeft:
+            fValue = fMsgBoxOrgX * fScale + (nWidth - fAuthoredWidth * fScale) * 0.5f;
+            break;
+        case Live::MsgBoxTop:
+            fValue = fMsgBoxOrgY * fScale + (nHeight - fAuthoredHeight * fScale) * 0.5f;
+            break;
         }
 
         const auto c = site.bFloat ? FloatConst(fValue) : IntConst(static_cast<int32_t>(fValue + 0.5f));
@@ -266,7 +286,7 @@ static int ReassociateFieldWidth(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// Three page titles size their own box out of the text they have just measured:
+// Pages sizing their own box from text they just measured:
 //
 //   C.TextSize(Caps(TitleText), W, H);
 //   DrawStretchedTexture(C, X, 80*fRatioY, (W+40)*fRatioX, (H+10)*fScaleTo*fRatioY, myRoot.FondMenu);
@@ -285,6 +305,33 @@ static constexpr uint8_t nAddFloat = 0xAE;
 static constexpr uint8_t nLocalVariable = 0x00;
 static constexpr auto nMeasuredHeightLength = 25;
 static constexpr auto nMeasuredWidthLength = 18;
+static constexpr uint8_t nDivideFloat = 0xAC;
+
+// Locals holding screen pixels. TextSize and StrLen answer through two out parameters, so a
+// parameter list ending <local> <local> 16 names both. Mixed with 640x480 numbers they scale
+// twice.
+static std::vector<uint32_t> aMeasured;
+
+static void CollectMeasured(uint8_t* pScript, int nSize)
+{
+    aMeasured.clear();
+
+    for (auto i = 0; i + 11 <= nSize; i++)
+    {
+        if (pScript[i] != nLocalVariable || pScript[i + 5] != nLocalVariable
+            || pScript[i + 10] != nEndFunctionParms)
+            continue;
+
+        aMeasured.push_back(*reinterpret_cast<uint32_t*>(pScript + i + 1));
+        aMeasured.push_back(*reinterpret_cast<uint32_t*>(pScript + i + 6));
+    }
+}
+
+static bool Measured(const uint8_t* pOperand)
+{
+    return std::find(aMeasured.begin(), aMeasured.end(),
+        *reinterpret_cast<const uint32_t*>(pOperand)) != aMeasured.end();
+}
 
 static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
 {
@@ -297,7 +344,7 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
 
         if (i + nMeasuredHeightLength <= nSize
             && p[0] == nMultiplyFloat && p[1] == nMultiplyFloat && p[2] == nAddFloat
-            && p[3] == nLocalVariable
+            && p[3] == nLocalVariable && Measured(p + 4)
             && std::memcmp(p + 8, aCastByte, sizeof(aCastByte)) == 0
             && p[12] == nEndFunctionParms
             && p[13] == nInstanceVariable && p[18] == nEndFunctionParms
@@ -315,7 +362,7 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
         }
 
         if (p[0] == nMultiplyFloat && p[1] == nAddFloat
-            && p[2] == nLocalVariable
+            && p[2] == nLocalVariable && Measured(p + 3)
             && std::memcmp(p + 7, aCastByte, sizeof(aCastByte)) == 0
             && p[11] == nEndFunctionParms
             && p[12] == nInstanceVariable && p[17] == nEndFunctionParms)
@@ -329,6 +376,361 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
             i += nMeasuredWidthLength - 1;
             nCount++;
         }
+    }
+
+    return nCount;
+}
+
+// A message box is whole pixels drawn by the GUI natives, which read WinLeft straight - no
+// origin, no ratio - so the pillarbox never reaches it. Only its panel gets the offset added
+// (hudscale's AddOrigin), hence panel centred, caption and buttons a pillarbox left.
+//
+// Cheaper to put the box in screen coordinates than to teach seven draw paths the offset, so
+// AdjustPosition centres against the screen, not the 4:3 box it is handed:
+//
+//   0F <WinLeft> AC AF 19 <C> <skip> <size> <ClipX> <WinWidth> 16 <39 3F 2C 02> 16     33 bytes
+//
+// A ClipX read is fourteen bytes, so is a float constant plus a zero. X first, Y second.
+static constexpr uint8_t nLet = 0x0F;
+static constexpr uint8_t nContext = 0x19;
+static constexpr uint8_t nIntConstCast[] = { 0x39, 0x3F, 0x1D };
+static constexpr auto nCentreLength = 33;
+static constexpr auto nCentreReadAt = 8;
+
+// Canvas field read and float-constant-plus-zero are both fourteen bytes. Constant rewritten with
+// the resolution.
+static void WriteLiveRead(uint8_t* pRead, Live eKind)
+{
+    uint8_t aFixed[14];
+    aFixed[0] = nAddFloat;
+    std::memcpy(aFixed + 1, FloatConst(0.0f).aBytes, nConstSize);
+    std::memcpy(aFixed + 6, nIntConstCast, sizeof(nIntConstCast));
+    std::memset(aFixed + 9, 0, 4);
+    aFixed[13] = nEndFunctionParms;
+
+    injector::WriteMemoryRaw(pRead, aFixed, sizeof(aFixed), true);
+
+    std::lock_guard g(mtxSites);
+    aSites.emplace_back(pRead + 1, eKind, true, 0.0f);
+}
+
+static int CentreOnScreen(uint8_t* pScript, int nSize)
+{
+    auto nCount = 0;
+
+    for (auto i = 0; i + nCentreLength <= nSize; i++)
+    {
+        auto p = pScript + i;
+
+        if (p[0] != nLet || p[1] != nInstanceVariable
+            || p[6] != nDivideFloat || p[7] != nSubtractFloat
+            || p[8] != nContext || p[9] != nLocalVariable
+            || p[17] != nInstanceVariable || p[22] != nInstanceVariable
+            || p[27] != nEndFunctionParms
+            || std::memcmp(p + 28, aCastByte, sizeof(aCastByte)) != 0
+            || p[31] != 2 || p[32] != nEndFunctionParms)
+            continue;
+
+        WriteLiveRead(p + nCentreReadAt, nCount == 0 ? Live::ScreenWidth : Live::ScreenHeight);
+
+        i += nCentreLength - 1;
+        nCount++;
+    }
+
+    return nCount;
+}
+
+// The in game box has no AdjustPosition: it keeps InitBox's argument, in 4:3 box coordinates.
+// InitBox opens by copying each parameter out, one statement each:
+//
+//   0F <WinWidth> <_Width>  ... <WinTop> <_OrgY>  <WinLeft> <_OrgX>          11 bytes each
+//
+// Third and fourth name the origins. Every read of them becomes the screen corner; a local read
+// and a float constant are both five bytes.
+static constexpr auto nCopyLength = 11;
+static constexpr auto nOrgYStatement = 2;
+static constexpr auto nOrgXStatement = 3;
+
+static int CentreInitBox(uint8_t* pScript, int nSize)
+{
+    uint32_t aOrg[2]{};
+
+    for (auto n = 0; n <= nOrgXStatement; n++)
+    {
+        auto p = pScript + n * nCopyLength;
+
+        if ((n + 1) * nCopyLength > nSize || p[0] != nLet || p[1] != nInstanceVariable
+            || p[6] != nLocalVariable)
+            return 0;
+
+        if (n == nOrgYStatement || n == nOrgXStatement)
+            std::memcpy(&aOrg[n - nOrgYStatement], p + 7, sizeof(uint32_t));
+    }
+
+    auto nCount = 0;
+
+    for (auto i = 0; i + nConstSize <= nSize; i++)
+    {
+        if (pScript[i] != nLocalVariable)
+            continue;
+
+        for (auto n = 0; n < 2; n++)
+        {
+            if (std::memcmp(pScript + i + 1, &aOrg[n], sizeof(uint32_t)) != 0)
+                continue;
+
+            injector::WriteMemoryRaw(pScript + i, const_cast<uint8_t*>(FloatConst(0.0f).aBytes),
+                nConstSize, true);
+
+            {
+                std::lock_guard g(mtxSites);
+                aSites.emplace_back(pScript + i, n == 0 ? Live::MsgBoxTop : Live::MsgBoxLeft,
+                    true, 0.0f);
+            }
+
+            i += nConstSize - 1;
+            nCount++;
+            break;
+        }
+    }
+
+    return nCount;
+}
+
+// The comic pages pop an onomatopoeia over whatever is highlighted, growing it from nothing:
+//
+//   DrawStretchedTexture(C, (205*fRatioX + 223) - 223*zoom, (23*fRatioY + 73) - 73*zoom,
+//                        223*zoom, 73*zoom, tOnomatopee[0]);
+//
+// Size is raw pixels, so WOO! WOO! and SLAM! stay as drawn. The two margins pinning the corner
+// are raw too while the corner is scaled, so the texture creeps as it grows. Wanted:
+// ratio(205 + 223*(1 - zoom)).
+//
+// A reassociation, so the position fits in place. The sizes are float constants, rewritten with
+// the resolution:
+//
+//   AF AE AB <205> <r> 16 <39 3F 2C DF> 16 AB <39 3F 2C DF> <zoom> 16 16          31 bytes
+//   AB AF AE <205>       <39 3F 2C DF> 16 AB <39 3F 2C DF> <zoom> 16 16 <r> 16
+static constexpr auto nPopPositionLength = 31;
+static constexpr auto nPopLength = 86;
+
+static bool PopPosition(const uint8_t* p)
+{
+    return p[0] == nSubtractFloat && p[1] == nAddFloat && p[2] == nMultiplyFloat
+        && p[3] == nFloatConst && p[8] == nInstanceVariable && p[13] == nEndFunctionParms
+        && std::memcmp(p + 14, aCastByte, sizeof(aCastByte)) == 0 && p[18] == nEndFunctionParms
+        && p[19] == nMultiplyFloat
+        && std::memcmp(p + 20, aCastByte, sizeof(aCastByte)) == 0
+        && p[24] == nLocalVariable && p[29] == nEndFunctionParms && p[30] == nEndFunctionParms;
+}
+
+static void RewritePopPosition(uint8_t* p)
+{
+    uint8_t aFixed[nPopPositionLength];
+    aFixed[0] = nMultiplyFloat;
+    aFixed[1] = nSubtractFloat;
+    aFixed[2] = nAddFloat;
+    std::memcpy(aFixed + 3, p + 3, nConstSize);      // the corner
+    std::memcpy(aFixed + 8, p + 14, 4);              // the margin
+    aFixed[12] = nEndFunctionParms;
+    aFixed[13] = nMultiplyFloat;
+    std::memcpy(aFixed + 14, p + 20, 4);             // the margin again
+    std::memcpy(aFixed + 18, p + 24, nConstSize);    // zoom
+    aFixed[23] = nEndFunctionParms;
+    aFixed[24] = nEndFunctionParms;
+    std::memcpy(aFixed + 25, p + 8, nConstSize);     // the ratio
+    aFixed[30] = nEndFunctionParms;
+
+    injector::WriteMemoryRaw(p, aFixed, nPopPositionLength, true);
+}
+
+static int ScaleOnomatopoeia(uint8_t* pScript, int nSize)
+{
+    auto nCount = 0;
+
+    for (auto i = 0; i + nPopLength <= nSize; i++)
+    {
+        auto p = pScript + i;
+
+        if (!PopPosition(p) || !PopPosition(p + nPopPositionLength))
+            continue;
+
+        // The two sizes, each a float constant times zoom.
+        if (p[62] != nMultiplyFloat || p[63] != nFloatConst || p[68] != nLocalVariable
+            || p[73] != nEndFunctionParms
+            || p[74] != nMultiplyFloat || p[75] != nFloatConst || p[80] != nLocalVariable
+            || p[85] != nEndFunctionParms)
+            continue;
+
+        RewritePopPosition(p);
+        RewritePopPosition(p + nPopPositionLength);
+
+        {
+            std::lock_guard g(mtxSites);
+
+            for (const auto nAt : { 63, 75 })
+            {
+                auto fAuthored = 0.0f;
+                std::memcpy(&fAuthored, p + nAt + 1, sizeof(fAuthored));
+                aSites.emplace_back(p + nAt, Live::Pixels, true, fAuthored);
+            }
+        }
+
+        i += nPopLength - 1;
+        nCount++;
+    }
+
+    return nCount;
+}
+
+// XIIIWindow.DrawLabel grows its box to fit the caption:
+//
+//   C.StrLen(myL.sLabel, W, H);
+//   if ((W + 16*fRatioX) > myL.XSize) { Offset = W + 16*fRatioX - myL.XSize; myL.XSize += Offset;
+//                                       ... myL.XPos -= Offset; }
+//
+// W is screen pixels, XPos/XSize are 640x480, so Offset carries the ratio into both: the box is
+// drawn (XSize-4)*fRatioX wide - the ratio squared - and slides a screen width left. Every page
+// that labels anything goes through it, the input pages' titles and key rows above all.
+//
+// In 640x480 terms: W/fRatioX + 16. Same nodes reassociated, fits in place:
+//
+//   AE <W> AB <39 3F 2C 10> 16 <fRatioX>       16 16       18 bytes
+//   AE AC  <W>              <fRatioX>       16 <39 3F 2C 10> 16
+static constexpr auto nLabelWidenLength = 18;
+
+static int FixLabelWiden(uint8_t* pScript, int nSize)
+{
+    auto nCount = 0;
+
+    for (auto i = 0; i + nLabelWidenLength <= nSize; i++)
+    {
+        auto p = pScript + i;
+
+        if (p[0] != nAddFloat || p[1] != nLocalVariable || !Measured(p + 2)
+            || p[6] != nMultiplyFloat
+            || std::memcmp(p + 7, aCastByte, sizeof(aCastByte)) != 0
+            || p[11] != nInstanceVariable
+            || p[16] != nEndFunctionParms || p[17] != nEndFunctionParms)
+            continue;
+
+        uint8_t aFixed[nLabelWidenLength];
+        aFixed[0] = nAddFloat;
+        aFixed[1] = nDivideFloat;
+        std::memcpy(aFixed + 2, p + 1, nConstSize);      // W
+        std::memcpy(aFixed + 7, p + 11, nConstSize);     // fRatioX
+        aFixed[12] = nEndFunctionParms;
+        std::memcpy(aFixed + 13, p + 7, 4);              // the 16
+        aFixed[17] = nEndFunctionParms;
+
+        injector::WriteMemoryRaw(p, aFixed, nLabelWidenLength, true);
+        i += nLabelWidenLength - 1;
+        nCount++;
+    }
+
+    return nCount;
+}
+
+// A dozen page titles centre their caption in a 640x480 box the same wrong way:
+//
+//   C.SetPos((150 + (160-W)/2)*fRatioX, (47.5 - H/2)*fRatioY);
+//
+// The whole term is scaled, W and H with it, so the text leaves the box - at 3840x2160 the video
+// page's title lands off the top left corner. Wanted 150*r + (160*r - W)/2, which folds to
+// (150 + 160/2)*r - W/2. Same node count; one multiply of the divisor pads the byte the fold
+// frees:
+//
+//   AB AE <150> AC AF <39 3F 2C A0> <W> 16 <39 3F 2C 02> 16 16 <r> 16          31 bytes
+//   AF AB <230> <r> 16 AB AC <W> <39 3F 2C 02> 16 <39 3F 2C 01> 16 16
+static constexpr auto nMeasuredCentreLength = 31;
+
+static int FoldMeasuredCentre(uint8_t* pScript, int nSize)
+{
+    auto nCount = 0;
+
+    for (auto i = 0; i + nMeasuredCentreLength <= nSize; i++)
+    {
+        auto p = pScript + i;
+
+        if (p[0] != nMultiplyFloat || p[1] != nAddFloat || p[2] != nFloatConst
+            || p[7] != nDivideFloat || p[8] != nSubtractFloat
+            || std::memcmp(p + 9, aCastByte, sizeof(aCastByte)) != 0
+            || p[13] != nLocalVariable || !Measured(p + 14)
+            || p[18] != nEndFunctionParms
+            || std::memcmp(p + 19, aCastByte, sizeof(aCastByte)) != 0
+            || p[23] != nEndFunctionParms || p[24] != nEndFunctionParms
+            || p[25] != nInstanceVariable || p[30] != nEndFunctionParms)
+            continue;
+
+        float fBase = 0.0f;
+        std::memcpy(&fBase, p + 3, sizeof(fBase));
+        const auto cFolded = FloatConst(fBase + p[12] * 0.5f);
+
+        uint8_t aFixed[nMeasuredCentreLength];
+        aFixed[0] = nSubtractFloat;
+        aFixed[1] = nMultiplyFloat;
+        std::memcpy(aFixed + 2, cFolded.aBytes, nConstSize);
+        std::memcpy(aFixed + 7, p + 25, nConstSize);     // r
+        aFixed[12] = nEndFunctionParms;
+        aFixed[13] = nMultiplyFloat;
+        aFixed[14] = nDivideFloat;
+        std::memcpy(aFixed + 15, p + 13, nConstSize);    // W
+        std::memcpy(aFixed + 20, p + 19, 4);             // the 2
+        aFixed[24] = nEndFunctionParms;
+        std::memcpy(aFixed + 25, aCastByte, sizeof(aCastByte));
+        aFixed[28] = 1;
+        aFixed[29] = nEndFunctionParms;
+        aFixed[30] = nEndFunctionParms;
+
+        injector::WriteMemoryRaw(p, aFixed, nMeasuredCentreLength, true);
+        i += nMeasuredCentreLength - 1;
+        nCount++;
+    }
+
+    return nCount;
+}
+
+// The Y half of the same line, and the pages that only have that half:
+//
+//   (47.5 - H/2)*fRatioY   ->   47.5*fRatioY - H/2
+//
+// A plain reassociation, so the byte count holds without padding:
+//
+//   AB AF <47.5> AC <H> <39 3F 2C 02> 16 16 <r> 16      25 bytes
+//   AF AB <47.5> <r> 16 AC <H> <39 3F 2C 02> 16 16
+static constexpr auto nMeasuredHalfLength = 25;
+
+static int SwapMeasuredCentre(uint8_t* pScript, int nSize)
+{
+    auto nCount = 0;
+
+    for (auto i = 0; i + nMeasuredHalfLength <= nSize; i++)
+    {
+        auto p = pScript + i;
+
+        if (p[0] != nMultiplyFloat || p[1] != nSubtractFloat || p[2] != nFloatConst
+            || p[7] != nDivideFloat
+            || p[8] != nLocalVariable || !Measured(p + 9)
+            || std::memcmp(p + 13, aCastByte, sizeof(aCastByte)) != 0
+            || p[17] != nEndFunctionParms || p[18] != nEndFunctionParms
+            || p[19] != nInstanceVariable || p[24] != nEndFunctionParms)
+            continue;
+
+        uint8_t aFixed[nMeasuredHalfLength];
+        aFixed[0] = nSubtractFloat;
+        aFixed[1] = nMultiplyFloat;
+        std::memcpy(aFixed + 2, p + 2, nConstSize);      // 47.5
+        std::memcpy(aFixed + 7, p + 19, nConstSize);     // r
+        aFixed[12] = nEndFunctionParms;
+        aFixed[13] = nDivideFloat;
+        std::memcpy(aFixed + 14, p + 8, nConstSize);     // H
+        std::memcpy(aFixed + 19, p + 13, 4);             // the 2
+        aFixed[23] = nEndFunctionParms;
+        aFixed[24] = nEndFunctionParms;
+
+        injector::WriteMemoryRaw(p, aFixed, nMeasuredHalfLength, true);
+        i += nMeasuredHalfLength - 1;
+        nCount++;
     }
 
     return nCount;
@@ -434,10 +836,11 @@ static void* FindProperty(void* pClass, const char* szName)
 // Turns a script bool on in the class defaults and everything already built from them: a subclass
 // copies its parent's defaults as it loads, so one that loaded first holds the old value, as does
 // every existing window. The optional float is a cached ratio; zeroing it forces a resize.
-static void SetDefaultBool(const char* szClass, const char* szProperty, const char* szStale = nullptr)
+static void SetDefaultBool(const char* szClass, const char* szProperty, const char* szStale = nullptr,
+    bool bOn = true)
 {
     auto pClass = FindObject(pAnyPackage, szClass);
-    auto pProperty = pClass ? FindObject(pClass, szProperty) : nullptr;
+    auto pProperty = pClass ? FindProperty(pClass, szProperty) : nullptr;
 
     // A class the level did not load is not a fault, and this runs twice a second.
     if (!pProperty)
@@ -472,7 +875,11 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
             if (!pDefaults || nSize < static_cast<int32_t>(nOffset + sizeof(uint32_t)))
                 continue;
 
-            *reinterpret_cast<uint32_t*>(pDefaults + nOffset) |= nMask;
+            if (bOn)
+                *reinterpret_cast<uint32_t*>(pDefaults + nOffset) |= nMask;
+            else
+                *reinterpret_cast<uint32_t*>(pDefaults + nOffset) &= ~nMask;
+
             continue;
         }
 
@@ -480,7 +887,10 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
         if (!pObjectClass || !pIsChildOf(pObjectClass, pClass))
             continue;
 
-        *reinterpret_cast<uint32_t*>(pObject + nOffset) |= nMask;
+        if (bOn)
+            *reinterpret_cast<uint32_t*>(pObject + nOffset) |= nMask;
+        else
+            *reinterpret_cast<uint32_t*>(pObject + nOffset) &= ~nMask;
 
         if (pStale)
             *reinterpret_cast<float*>(pObject + nStaleOffset) = 0.0f;
@@ -571,122 +981,11 @@ static void ScaleStyleBorders()
     }
 }
 
-// The pillarbox does not reach a message box: its children are plain engine components placed
-// straight from WinLeft, not XIIIWindow controls that add it themselves, so the text lands a
-// pillarbox left of its panel. AdjustPosition would have re-centred it but sits behind
-// CurrentPF == 0, and this build reports 2.
-//
-// Only the children move. WinLeft feeds XIIIWindow's Paint through a draw that adds the centring
-// origin and DrawMsgboxBackground through one that does not, so moving it would put those two a
-// pillarbox apart; the panel gets the same offset on the draw side instead.
-static std::vector<void*> aCentredBoxes;
-
-static void CentreMessageBoxes()
-{
-    const auto nWidth = nBackBufferWidth.load();
-    const auto nHeight = nBackBufferHeight.load();
-
-    if (nWidth <= 0 || nHeight <= 0)
-        return;
-
-    const auto fScale = (std::min)(nWidth / fAuthoredWidth, nHeight / fAuthoredHeight);
-    const auto fPillarX = (nWidth - fAuthoredWidth * fScale) * 0.5f;
-    const auto fPillarY = (nHeight - fAuthoredHeight * fScale) * 0.5f;
-
-    if (fPillarX <= 0.0f && fPillarY <= 0.0f)
-        return;
-
-    // None is a child of the others: the in game one extends XIIIWindow directly.
-    void* aClasses[3]{};
-    auto nClasses = 0;
-
-    for (const auto szName : { "XIIIMsgBox", "XIIIMsgBoxInGame", "XIIILiveMsgBox" })
-    {
-        if (auto pFound = FindObject(pAnyPackage, szName))
-            aClasses[nClasses++] = pFound;
-    }
-
-    if (!nClasses)
-        return;
-
-    auto pClass = aClasses[0];
-
-    // A property belongs to its declaring class, so a lookup on a subclass finds nothing, and the
-    // declarer's runtime name is not always the one in the sources - WinLeft is on GUIComponent,
-    // Controls further down. So the search walks up from the box's own class.
-    auto pWinLeft = FindProperty(pClass, "WinLeft");
-    auto pWinTop = FindProperty(pClass, "WinTop");
-    auto pControls = FindProperty(pClass, "Controls");
-
-    if (!pWinLeft || !pWinTop || !pControls)
-    {
-        // Every frame, so once is enough. Which of the three is missing is the diagnosis.
-        static auto bSaid = false;
-
-        if (!std::exchange(bSaid, true))
-            LogWarn("MenuScale: a message box's geometry was not found ({}, {}, {}), they stay off centre",
-                pWinLeft != nullptr, pWinTop != nullptr, pControls != nullptr);
-
-        return;
-    }
-
-    const auto nLeft = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pWinLeft) + nOffsetPropertyOffset);
-    const auto nTop = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pWinTop) + nOffsetPropertyOffset);
-    const auto nList = *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pControls) + nOffsetPropertyOffset);
-
-    const auto Shift = [&](uint8_t* pWindow)
-    {
-        *reinterpret_cast<float*>(pWindow + nLeft) += fPillarX;
-        *reinterpret_cast<float*>(pWindow + nTop) += fPillarY;
-    };
-
-    for (auto i = 0; i < *pnObjects; i++)
-    {
-        auto pObject = static_cast<uint8_t*>((*pppObjects)[i]);
-
-        if (!pObject)
-            continue;
-
-        auto pObjectClass = *reinterpret_cast<void**>(pObject + nOffsetObjectClass);
-
-        if (pObjectClass == pUClassClass || !pObjectClass)
-            continue;
-
-        auto bIsBox = false;
-
-        for (auto c = 0; c < nClasses && !bIsBox; c++)
-            bIsBox = pObjectClass == aClasses[c];
-
-        if (!bIsBox)
-            continue;
-
-        if (std::find(aCentredBoxes.begin(), aCentredBoxes.end(), pObject) != aCentredBoxes.end())
-            continue;
-
-        aCentredBoxes.push_back(pObject);
-
-        // Controls is a TArray of component pointers: data, count, capacity.
-        auto ppControls = *reinterpret_cast<uint8_t***>(pObject + nList);
-        const auto nCount = *reinterpret_cast<int32_t*>(pObject + nList + 4);
-
-        for (auto c = 0; ppControls && c < nCount; c++)
-        {
-            if (ppControls[c])
-                Shift(ppControls[c]);
-        }
-    }
-}
-
 // Menus are built as they are opened, so new windows have to be caught.
 export void RefreshInterfaceObjects()
 {
     if (!pStaticFindObject || !pIsChildOf || !pUClassClass || !pppObjects || !pnObjects)
         return;
-
-    // Has to run before a new box's first draw or it shows in the corner for a frame, and the
-    // object count cannot be watched because the engine reuses freed slots. So: every frame, made
-    // cheap with three pointer compares per object rather than IsChildOf.
-    CentreMessageBoxes();
 
     static uint32_t nLastSweep = 0;
     const auto nNow = GetTickCount();
@@ -697,6 +996,11 @@ export void RefreshInterfaceObjects()
     nLastSweep = nNow ? nNow : 1;
 
     SetDefaultBool("XIIIWindow", "bCenterInGame");
+
+    // The box lays out in screen pixels now, but the help bar it inherits lays out in the 4:3 box,
+    // so it would land a pillarbox left of the page's own bar - which says the same thing.
+    for (const auto szBox : { "XIIIMsgBox", "XIIIMsgBoxInGame", "XIIILiveMsgBox" })
+        SetDefaultBool(szBox, "bDisplayBar", nullptr, false);
 
     // XIIIComboControl caches the ratio it last sized itself at, so that is cleared too.
     SetDefaultBool("XIIIComboControl", "bCalculateSize", "OldRatioX");
@@ -795,19 +1099,38 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIRootWindow."))
         nTotal += RewriteOnce(pScript, nSize, 448, 480.0f);
 
-    // Button width comes from the ratio but height from a raw 30, so they come out as slivers.
-    if (std::strstr(szFullName, ".LayoutButtons")
+    // Message box buttons are raw pixels - 88 wide, 30 tall, 5 up from the bottom - and the gap
+    // between them is whatever is left, so they come out slivers bunched in the middle.
+    if ((std::strstr(szFullName, ".LayoutButtons") || std::strstr(szFullName, ".AdjustPosition"))
         && OwnedByAny(szFullName, { ".XIIIMsgBox.", ".XIIIMsgBoxInGame.", ".XIIILiveMsgBox." }))
     {
         auto nCount = 0;
 
-        for (const uint8_t nPixels : { 5, 30 })
+        for (const uint8_t nPixels : { 5, 30, 88 })
         {
             nCount += RecordPixels(pScript, nSize, nPixels);
             nCount += RecordLive(pScript, nSize, nPixels, Live::Pixels);
         }
 
         nTotal += nCount;
+    }
+
+    if (std::strstr(szFullName, ".AfterPaint") && std::strstr(szFullName, "XIDInterf."))
+        nTotal += ScaleOnomatopoeia(pScript, nSize);
+
+    if (std::strstr(szFullName, ".XIIIMsgBox.AdjustPosition"))
+        nTotal += CentreOnScreen(pScript, nSize);
+
+    if (std::strstr(szFullName, ".XIIIMsgBoxInGame.InitBox"))
+        nTotal += CentreInitBox(pScript, nSize);
+
+    // Caret under the name being typed, and the dots at each end when the text is trimmed: raw
+    // pixels, a couple of texels wide at any resolution. Every float constant here is one of
+    // their sizes.
+    if (std::strstr(szFullName, ".XIIIEditCtrl.Paint"))
+    {
+        nTotal += RecordLive(pScript, nSize, 8, Live::Pixels)
+            + RecordLive(pScript, nSize, 2, Live::Pixels);
     }
 
     if (std::strstr(szFullName, ".XIIIEditCtrl."))
@@ -825,9 +1148,22 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIMenuInGame.SetObjectives"))
         nTotal += NeutraliseLinePitch(pScript, nSize);
 
-    // The three pages that draw a title box around text they measured themselves.
-    if (OwnedByAny(szFullName, { ".XIIIMenuSelectProfile.", ".XIIIMenuCreateProfile.", ".XIIIMenuMultiProfile." }))
-        nTotal += NeutraliseMeasuredRatio(pScript, nSize);
+    // Every menu page that measures its own text. Shapes are specific and each is gated on the
+    // local really holding a measurement, so the whole package can be swept.
+    if (std::strstr(szFullName, "XIDInterf."))
+    {
+        CollectMeasured(pScript, nSize);
+
+        if (!aMeasured.empty())
+        {
+            nTotal += NeutraliseMeasuredRatio(pScript, nSize)
+                + FoldMeasuredCentre(pScript, nSize)
+                + SwapMeasuredCentre(pScript, nSize);
+
+            if (std::strstr(szFullName, ".XIIIWindow.DrawLabel"))
+                nTotal += FixLabelWiden(pScript, nSize);
+        }
+    }
 
     if (nTotal)
         ApplyLiveSites();
