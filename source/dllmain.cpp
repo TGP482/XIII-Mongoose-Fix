@@ -11,6 +11,7 @@ import msaa;
 import internalres;
 import fov;
 import maxfps;
+import fpsfixes;
 import rawmouse;
 import comicpanels;
 import crashdump;
