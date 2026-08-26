@@ -7,60 +7,130 @@ export module rawmouse;
 import common;
 import settings;
 import logging;
+import display;
 
-// The engine reads the mouse through DirectInput one buffered packet at a time, one input event
-// each, then runs it through UPlayerInput::SmoothMouse - a half-and-half filter with a borrow
-// term, a 0.07s decay tail, and a clamp of the smoothed value to +/-1 that eats fast movement, so
-// flicks go nowhere and the feel follows the polling rate. So the deltas come from raw input
-// instead, one sum per frame, written over what DirectInput accumulated, and the filter is jumped
-// over its own body.
+// DirectInput feeds UPlayerInput::SmoothMouse, which averages frames, keeps a 0.07s tail and clamps
+// to +/-1, so flicks vanish and the feel follows the polling rate. Raw input instead: true counts,
+// filter jumped.
 //
-// UPlayerInput +0x30 is its APlayerController; aMouseX +0x34C, aMouseY +0x350.
-static constexpr auto nOffsetPlayerController = 0x30;
-static constexpr auto nOffsetMouseX = 0x34C;
-static constexpr auto nOffsetMouseY = 0x350;
-
-// UInput::ReadInput multiplies every axis by 20/DeltaTime and the script consuming aTurn
-// multiplies by DeltaTime again, which is what makes look speed frame rate independent. Raw deltas
-// go in with the same factor, so 1.0 matches the stock feel.
-static constexpr auto fEngineAxisScale = 20.0f;
-
-// UGUIController::NativeKeyEvent in GUI.dll moves the menu cursor itself, one packet at a time:
+// One raw registration per device per process, last caller wins. Ours replaces DirectInput's and
+// its stream stops dead - no axis, no buttons, frozen menu - so the deltas go back in through
+// UWindowsViewport::CauseInputEvent, the door DirectInput used. Player, console and menu unchanged.
 //
-//   MouseX = (int)((float)(int)(Delta - 0.5) * MenuMouseSens + MouseX)
-//
-// The 0.5 is a deadzone: a single-count packet lands on 0.5, rounds to nearest even and moves the
-// cursor not at all, and packet size follows the polling rate. Dropping the subtraction leaves the
-// count alone; the deltas come from raw input here too.
+// Menu cursor per packet:  MouseX = (int)((float)(int)(Delta - 0.5) * MenuMouseSens + MouseX)
+// The 0.5 is a deadzone: one count lands on 0.5, rounds to even, moves nothing. Subtraction NOPed.
 static constexpr auto nKeyMouseX = 0xE4;
 static constexpr auto nKeyMouseY = 0xE5;
 
-// Not a setting - only cleared by raw input failing to come up, which falls back on DirectInput
-// rather than leaving the mouse dead.
-static std::atomic<bool> bRawMouseInput = true;
-static std::atomic<float> fMouseSensitivity = 1.0f;
+// Key codes as the game numbers them.
+static constexpr auto nKeyLeftMouse = 1;
+static constexpr auto nKeyRightMouse = 2;
+static constexpr auto nKeyMiddleMouse = 4;
+static constexpr auto nKeyWheelUp = 0xEC;
+static constexpr auto nKeyWheelDown = 0xED;
 
-static std::atomic<int32_t> nAccumulatedX = 0;
-static std::atomic<int32_t> nAccumulatedY = 0;
+static constexpr auto nInputActionPress = 1;
+static constexpr auto nInputActionRelease = 3;
 
-// The menu drains its own pair: same messages, different moments, so sharing would lose movement.
-static std::atomic<int32_t> nMenuAccumulatedX = 0;
-static std::atomic<int32_t> nMenuAccumulatedY = 0;
+// The menu moves per event, not per count: a frame summed into one event leaves the cursor
+// crawling. One event per packet, as DirectInput did. The player's counts still sum the same.
+struct InputEvent { int nKey; int nAction; float fDelta; };
 
-static HWND hGameWindow = nullptr;
-static WNDPROC pOriginalWndProc = nullptr;
+static std::mutex mutexEvents;
+static std::vector<InputEvent> aEvents;
 
-static SafetyHookInline shDealWithPlayerInputEvent{};
-static SafetyHookInline shNativeKeyEvent{};
+// Only so a stall cannot grow the queue; a frame never holds this many.
+static constexpr size_t nMaxQueued = 512;
+
+static void Queue(int nKey, int nAction, float fDelta)
+{
+    std::scoped_lock lock(mutexEvents);
+
+    if (aEvents.size() < nMaxQueued)
+        aEvents.push_back({ nKey, nAction, fDelta });
+}
+
+// The FOV factor the player's axes are multiplied by, ours to write - the patch below points the
+// engine's FLD here. Gameplay only; the menu never runs that code.
+static float fPlayerMouseScale = 1.0f;
+
+// One count, both ends.
+//   Menu:   cursor += Delta * MenuMouseSens, in pixels.
+//   Player: counts, * 20/DeltaTime in UInput::ReadInput, * the factor above and the game's own
+//           MouseSensitivity, * 0.24 into aTurn, then Yaw += 32 * DeltaTime * aTurn. DeltaTime
+//           cancels: 32 * 20 * 0.24 = 153.6 yaw units per unit of factor, 65536 units = 360.
+static constexpr auto fYawPerCount = 153.6f * 360.0f / 65536.0f;
+
+// GUIController's default; XIII's ini never touches it.
+static constexpr auto fMenuMouseSens = 1.0f;
+
+// What XIDInterf lays the menus out in, the pair menuscale scales from.
+static constexpr auto fMenuAuthoredWidth = 640.0f;
+static constexpr auto fMenuAuthoredHeight = 480.0f;
+
+static SafetyHookInline shUpdateInput{};
+
+// UWindowsViewport::CauseInputEvent(iKey, EInputAction, Delta) - WinDrv.dll. IST_Axis is 4.
+using fnCauseInputEvent = int(__thiscall*)(void*, int, int, float);
+static fnCauseInputEvent pCauseInputEvent = nullptr;
+
+static constexpr auto nInputActionAxis = 4;
 
 // Written while the setting is off, restored while it is on.
 static std::unique_ptr<raw_mem> patchSkipSmoothing;
 static std::unique_ptr<raw_mem> patchNoFovScaling;
 static std::vector<std::unique_ptr<raw_mem>> patchNoMenuDeadzone;
 
-static LRESULT CALLBACK WndProc(HWND hWnd, UINT nMessage, WPARAM wParam, LPARAM lParam)
+// Not the game's window: it owns that window procedure and recreates the window on a mode change,
+// either of which drops the deltas silently. A message only window of our own, own pump.
+static HWND hRawInputWindow = nullptr;
+static std::atomic<bool> bRawInputReady = false;
+
+// RIDEV_INPUTSINK delivers with or without focus, so the focus test moves here - alt-tab still
+// stops movement.
+static bool ForegroundIsGame()
 {
-    if (nMessage == WM_INPUT && bRawMouseInput)
+    DWORD nProcessId = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &nProcessId);
+    return nProcessId == GetCurrentProcessId();
+}
+
+static void QueueButtons(uint16_t nFlags, uint16_t nData)
+{
+    static constexpr std::pair<uint16_t, int> aDown[] =
+    {
+        { RI_MOUSE_LEFT_BUTTON_DOWN, nKeyLeftMouse },
+        { RI_MOUSE_RIGHT_BUTTON_DOWN, nKeyRightMouse },
+        { RI_MOUSE_MIDDLE_BUTTON_DOWN, nKeyMiddleMouse },
+    };
+
+    static constexpr std::pair<uint16_t, int> aUp[] =
+    {
+        { RI_MOUSE_LEFT_BUTTON_UP, nKeyLeftMouse },
+        { RI_MOUSE_RIGHT_BUTTON_UP, nKeyRightMouse },
+        { RI_MOUSE_MIDDLE_BUTTON_UP, nKeyMiddleMouse },
+    };
+
+    for (const auto& [nFlag, nKey] : aDown)
+        if (nFlags & nFlag)
+            Queue(nKey, nInputActionPress, 0.0f);
+
+    for (const auto& [nFlag, nKey] : aUp)
+        if (nFlags & nFlag)
+            Queue(nKey, nInputActionRelease, 0.0f);
+
+    // Wheel has no up and down of its own: press and release per notch.
+    if (nFlags & RI_MOUSE_WHEEL)
+    {
+        const auto nKey = static_cast<int16_t>(nData) > 0 ? nKeyWheelUp : nKeyWheelDown;
+        Queue(nKey, nInputActionPress, 0.0f);
+        Queue(nKey, nInputActionRelease, 0.0f);
+    }
+}
+
+static LRESULT CALLBACK WndProc(HWND hWindow, UINT nMessage, WPARAM wParam, LPARAM lParam)
+{
+    if (nMessage == WM_INPUT && ForegroundIsGame())
     {
         RAWINPUT input{};
         UINT nSize = sizeof(input);
@@ -69,92 +139,129 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT nMessage, WPARAM wParam, LPARAM 
             && input.header.dwType == RIM_TYPEMOUSE
             && (input.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0)
         {
-            nAccumulatedX += input.data.mouse.lLastX;
-            nAccumulatedY += input.data.mouse.lLastY;
-            nMenuAccumulatedX += input.data.mouse.lLastX;
-            nMenuAccumulatedY += input.data.mouse.lLastY;
+            // Raw Y counts down as positive, the engine's axis counts up.
+            if (input.data.mouse.lLastX)
+                Queue(nKeyMouseX, nInputActionAxis, static_cast<float>(input.data.mouse.lLastX));
+            if (input.data.mouse.lLastY)
+                Queue(nKeyMouseY, nInputActionAxis, static_cast<float>(-input.data.mouse.lLastY));
+
+            QueueButtons(input.data.mouse.usButtonFlags, input.data.mouse.usButtonData);
         }
     }
 
-    return CallWindowProcW(pOriginalWndProc, hWnd, nMessage, wParam, lParam);
+    return DefWindowProcW(hWindow, nMessage, wParam, lParam);
 }
 
-// FindWindowEx walks the whole desktop and the class name belongs to every UE2 game, hence the
-// process check.
-static HWND FindViewportWindow()
+// DirectInput takes the registration back whenever the game acquires the mouse, hence not once.
+static bool RegisterRawMouse()
 {
-    for (HWND hWindow = nullptr; (hWindow = FindWindowExA(nullptr, hWindow, "WWindowsViewportWindow", nullptr)) != nullptr; )
-    {
-        DWORD nProcessId = 0;
-        GetWindowThreadProcessId(hWindow, &nProcessId);
+    RAWINPUTDEVICE device{ 0x01, 0x02, RIDEV_INPUTSINK, hRawInputWindow };
+    return RegisterRawInputDevices(&device, 1, sizeof(device)) != FALSE;
+}
 
-        if (nProcessId == GetCurrentProcessId())
-            return hWindow;
+static void InputThread()
+{
+    WNDCLASSEXW windowClass{ sizeof(windowClass) };
+    windowClass.lpfnWndProc = WndProc;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.lpszClassName = L"XIIIMongooseFixRawInput";
+    RegisterClassExW(&windowClass);
+
+    hRawInputWindow = CreateWindowExW(0, windowClass.lpszClassName, nullptr, 0, 0, 0, 0, 0,
+        HWND_MESSAGE, nullptr, windowClass.hInstance, nullptr);
+
+    if (!hRawInputWindow)
+        return;
+
+    if (!RegisterRawMouse())
+    {
+        DestroyWindow(hRawInputWindow);
+        hRawInputWindow = nullptr;
+        return;
     }
 
-    return nullptr;
+    bRawInputReady = true;
+
+    uint32_t nTicks = 0;
+
+    for (MSG message{}; ; )
+    {
+        // Timeout keeps the re-registration below ticking on a still mouse.
+        MsgWaitForMultipleObjectsEx(0, nullptr, 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (message.message == WM_QUIT)
+                return;
+
+            DispatchMessageW(&message);
+        }
+
+        // Half a second is the longest the game can hold the mouse off us.
+        if (++nTicks % 5 == 0)
+            RegisterRawMouse();
+    }
 }
 
-// Deferred to the first frame of input: the window does not exist while the asi is loading.
+// First input event, not load: DllMain holds the loader lock, no window can be created under it.
 static bool EnsureRawInput()
 {
-    if (hGameWindow)
-        return true;
+    static std::once_flag flag;
+    std::call_once(flag, []() { std::thread(InputThread).detach(); });
 
-    auto hWindow = FindViewportWindow();
-    if (!hWindow)
-        return false;
-
-    pOriginalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(hWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
-    if (!pOriginalWndProc)
-    {
-        LogWarn("RawMouseInput: could not subclass the game window ({}), falling back to the game's own input", GetLastError());
-        bRawMouseInput = false;
-        return false;
-    }
-
-    hGameWindow = hWindow;
-
-    // No RIDEV_INPUTSINK on purpose: without it movement stops the moment the game loses focus,
-    // which is what anyone alt-tabbing expects.
-    RAWINPUTDEVICE device{};
-    device.usUsagePage = 0x01;
-    device.usUsage = 0x02;
-    device.dwFlags = 0;
-    device.hwndTarget = hGameWindow;
-
-    if (!RegisterRawInputDevices(&device, 1, sizeof(device)))
-    {
-        LogWarn("RawMouseInput: RegisterRawInputDevices failed ({}), falling back to the game's own input", GetLastError());
-        SetWindowLongPtrW(hGameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(pOriginalWndProc));
-        pOriginalWndProc = nullptr;
-        hGameWindow = nullptr;
-        bRawMouseInput = false;
-        return false;
-    }
-
-    LogInfo("RawMouseInput: attached to window 0x{:08X}", reinterpret_cast<uintptr_t>(hGameWindow));
-    return true;
+    return bRawInputReady.load();
 }
 
-static void __fastcall DealWithPlayerInputEvent(uint8_t* pThis, void*, float fDeltaTime)
+// UWindowsViewport::UpdateInput is the per frame DirectInput poll: game thread, viewport to hand.
+// A count moves the cursor MenuMouseSens units, and the menus are 640x480 blown up by
+// min(width/640, height/480), so that many screen pixels. The view should turn by what those
+// pixels are worth: the field of view over the width.
+static void UpdatePlayerScale()
 {
-    if (bRawMouseInput && fDeltaTime > 0.0f && EnsureRawInput())
-    {
-        auto pController = *reinterpret_cast<uint8_t**>(pThis + nOffsetPlayerController);
-        if (pController)
-        {
-            const auto nX = nAccumulatedX.exchange(0);
-            const auto nY = nAccumulatedY.exchange(0);
-            const auto fScale = fMouseSensitivity.load() * (fEngineAxisScale / fDeltaTime);
+    const auto nWidth = nBackBufferWidth.load();
+    const auto nHeight = nBackBufferHeight.load();
+    if (nWidth < 1 || nHeight < 1)
+        return;
 
-            // The engine's own path negates Y: raw input counts down as positive.
-            *reinterpret_cast<float*>(pController + nOffsetMouseX) = static_cast<float>(nX) * fScale;
-            *reinterpret_cast<float*>(pController + nOffsetMouseY) = static_cast<float>(-nY) * fScale;
-        }
+    const auto fMenuScale = (std::min)(nWidth / fMenuAuthoredWidth, nHeight / fMenuAuthoredHeight);
+    const auto fDegreesPerPixel = MongooseFixSettings.GetFloat(PREF_FIELDOFVIEW) / static_cast<float>(nWidth);
+    const auto fMatched = fMenuMouseSens * fMenuScale * fDegreesPerPixel / fYawPerCount;
+
+    fPlayerMouseScale = fMatched * MongooseFixSettings.GetFloat(PREF_MOUSESENSITIVITY);
+}
+
+static void __fastcall UpdateInput(void* pThis, void*, int bIsMainViewport)
+{
+    shUpdateInput.fastcall<void>(pThis, nullptr, bIsMainViewport);
+
+    if (!pCauseInputEvent || !EnsureRawInput())
+        return;
+
+    std::vector<InputEvent> aPending;
+    {
+        std::scoped_lock lock(mutexEvents);
+        aPending.swap(aEvents);
     }
 
-    shDealWithPlayerInputEvent.fastcall<void>(pThis, nullptr, fDeltaTime);
+    // Raw counts only. The menu scales by MenuMouseSens, the player by the factor above - the two
+    // stay independent.
+    for (const auto& event : aPending)
+    {
+        pCauseInputEvent(pThis, event.nKey, event.nAction, event.fDelta);
+    }
+}
+
+static void InitWinDrv()
+{
+    auto hWinDrv = GetModuleHandleW(L"WinDrv.dll");
+    if (!hWinDrv)
+        return;
+
+    pCauseInputEvent = reinterpret_cast<fnCauseInputEvent>(GetProcAddress(hWinDrv, "?CauseInputEvent@UWindowsViewport@@QAEHHW4EInputAction@@M@Z"));
+
+    if (auto p = GetProcAddress(hWinDrv, "?UpdateInput@UWindowsViewport@@UAEXH@Z"))
+        shUpdateInput = safetyhook::create_inline(p, UpdateInput);
+
 }
 
 static void InitEngine()
@@ -162,15 +269,6 @@ static void InitEngine()
     auto hEngine = GetModuleHandleW(L"Engine.dll");
     if (!hEngine)
         return;
-
-    auto pDealWith = GetProcAddress(hEngine, "?DealWithPlayerInputEvent@UPlayerInput@@QAEXM@Z");
-    if (!pDealWith)
-    {
-        LogWarn("RawMouseInput: Engine.dll did not export DealWithPlayerInputEvent, mouse options are off");
-        return;
-    }
-
-    shDealWithPlayerInputEvent = safetyhook::create_inline(pDealWith, DealWithPlayerInputEvent);
 
     // MOV AL,[ECX+0x28] / TEST AL,1 - the bMaxMouseSmoothing test at the top of SmoothMouse, and
     // the pass through tail to jump to instead.
@@ -194,13 +292,17 @@ static void InitEngine()
     }
 
     // FLD [ESI+0x3AC] (DesiredFOV) / FMUL qword [0.01111] - the mouse scaled by field of view, so
-    // widening the FOV quietly raises sensitivity. FLD1 in its place leaves the rest of the
-    // function reading a factor of one. Not a setting.
+    // widening the FOV quietly raises sensitivity. Both are replaced by a FLD of our own float, so
+    // the FOV drops out and the factor is ours to set. Twelve bytes for twelve. Not a setting.
     auto patternFovScale = module_pattern(L"Engine.dll", "D9 86 AC 03 00 00 DC 0D ? ? ? ? 8B 46 7C");
     if (!patternFovScale.empty())
     {
+        const auto pScale = reinterpret_cast<uintptr_t>(&fPlayerMouseScale);
+        const auto pByte = reinterpret_cast<const uint8_t*>(&pScale);
+
         patchNoFovScaling = std::make_unique<raw_mem>(patternFovScale.get_first(0),
-            std::initializer_list<uint8_t>{ 0xD9, 0xE8, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 });
+            std::initializer_list<uint8_t>{ 0xD9, 0x05, pByte[0], pByte[1], pByte[2], pByte[3],
+                0x90, 0x90, 0x90, 0x90, 0x90, 0x90 });
         patchNoFovScaling->Write();
     }
     else
@@ -208,7 +310,10 @@ static void InitEngine()
         LogWarn("RawMouseInput: field of view scaling pattern not found, sensitivity still follows the FOV");
     }
 
-    BindFloat(fMouseSensitivity, PREF_MOUSESENSITIVITY);
+    ApplyAndWatch(UpdatePlayerScale);
+
+    // The screen width is half the sum, so a resolution change has to redo it.
+    onDeviceResetEvent() += []() { UpdatePlayerScale(); };
 
     ApplyAndWatch([]()
     {
@@ -217,31 +322,11 @@ static void InitEngine()
     });
 }
 
-// Each axis arrives as its own event and gets what has been summed since the last one of that
-// axis. Y is negated as in game; the handler subtracts what it is given from the cursor's Y.
-static int __fastcall NativeKeyEvent(uint8_t* pThis, void*, uint8_t* pKey, uint8_t* pState, float fDelta)
-{
-    if (bRawMouseInput && pKey && EnsureRawInput())
-    {
-        if (*pKey == nKeyMouseX)
-            fDelta = static_cast<float>(nMenuAccumulatedX.exchange(0));
-        else if (*pKey == nKeyMouseY)
-            fDelta = static_cast<float>(-nMenuAccumulatedY.exchange(0));
-    }
-
-    return shNativeKeyEvent.fastcall<int>(pThis, nullptr, pKey, pState, fDelta);
-}
-
 static void InitGUI()
 {
     auto hGUI = GetModuleHandleW(L"GUI.dll");
     if (!hGUI)
         return;
-
-    if (auto p = GetProcAddress(hGUI, "?NativeKeyEvent@UGUIController@@UAEHAAE0M@Z"))
-        shNativeKeyEvent = safetyhook::create_inline(p, NativeKeyEvent);
-    else
-        LogWarn("RawMouseInput: GUI.dll did not export NativeKeyEvent, the menu cursor is untouched");
 
     // FLD [ESP+0x28] (the axis delta) / FSUB [0.5] - once per axis. Not a setting: the deadzone
     // eats the smallest movement the mouse can report.
@@ -260,22 +345,14 @@ static void InitGUI()
     }
 }
 
-// From DLL_PROCESS_DETACH, under the loader lock, on a window that may already be gone. The window
-// procedure only goes back if it is still ours - overwriting a later subclass is worse.
+// From DLL_PROCESS_DETACH, under the loader lock: unregister and leave the thread to die with the
+// process. Nothing of the game's was touched, so there is nothing to put back.
 static void Shutdown()
 {
-    RAWINPUTDEVICE device{};
-    device.usUsagePage = 0x01;
-    device.usUsage = 0x02;
-    device.dwFlags = RIDEV_REMOVE;
-    device.hwndTarget = nullptr;
+    bRawInputReady = false;
+
+    RAWINPUTDEVICE device{ 0x01, 0x02, RIDEV_REMOVE, nullptr };
     RegisterRawInputDevices(&device, 1, sizeof(device));
-
-    if (!hGameWindow || !pOriginalWndProc || !IsWindow(hGameWindow))
-        return;
-
-    if (reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hGameWindow, GWLP_WNDPROC)) == WndProc)
-        SetWindowLongPtrW(hGameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(pOriginalWndProc));
 }
 
 class RawMouse
@@ -284,6 +361,7 @@ public:
     RawMouse()
     {
         MongooseFix::onEngineInitEvent() += []() { InitEngine(); };
+        MongooseFix::onWinDrvInitEvent() += []() { InitWinDrv(); };
         MongooseFix::onGUIInitEvent() += []() { InitGUI(); };
         MongooseFix::onShutdownEvent() += []() { Shutdown(); };
     }

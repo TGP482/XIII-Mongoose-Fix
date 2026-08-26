@@ -159,6 +159,29 @@ T GetExeModuleName()
         return name.substr(name.find_last_of(L"/\\") + 1);
 }
 
+// By process rather than by class name: XIII does not use the WWindowsViewportWindow class every
+// other UE2 game does. EnumWindows is top level only, and an owner means a dialog.
+export inline HWND FindGameWindow()
+{
+    struct Search { DWORD nProcessId; HWND hWindow; } search{ GetCurrentProcessId(), nullptr };
+
+    EnumWindows([](HWND hWindow, LPARAM lParam) -> BOOL
+    {
+        auto& search = *reinterpret_cast<Search*>(lParam);
+
+        DWORD nProcessId = 0;
+        GetWindowThreadProcessId(hWindow, &nProcessId);
+
+        if (nProcessId != search.nProcessId || !IsWindowVisible(hWindow) || GetWindow(hWindow, GW_OWNER))
+            return TRUE;
+
+        search.hWindow = hWindow;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&search));
+
+    return search.hWindow;
+}
+
 export inline bool IsModuleUAL(HMODULE mod)
 {
     return GetProcAddress(mod, "IsUltimateASILoader") != nullptr;

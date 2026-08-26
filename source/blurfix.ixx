@@ -5,6 +5,7 @@ module;
 export module blurfix;
 
 import common;
+import settings;
 import logging;
 
 // Blur and sharpen render the frame into an offscreen target, blur it, stretch it back. D3DDrv
@@ -56,8 +57,18 @@ static void __fastcall CreateEffectBuffers(uint8_t* pThis, void*)
 {
     auto pRenderDevice = *reinterpret_cast<uint8_t**>(pThis + nOffsetRenderDevice);
 
-    const auto nWidth = *reinterpret_cast<int32_t*>(pRenderDevice + nOffsetBackBufferSizeX);
-    const auto nHeight = *reinterpret_cast<int32_t*>(pRenderDevice + nOffsetBackBufferSizeY);
+    auto nWidth = *reinterpret_cast<int32_t*>(pRenderDevice + nOffsetBackBufferSizeX);
+    auto nHeight = *reinterpret_cast<int32_t*>(pRenderDevice + nOffsetBackBufferSizeY);
+
+    // Runs inside SetRes, before the internal size is stamped over SizeX/SizeY, so the setting is
+    // the only source. The effect pass follows the frame, not the window.
+    const auto nInternalX = MongooseFixSettings.GetInt(PREF_INTERNALRESX);
+    const auto nInternalY = MongooseFixSettings.GetInt(PREF_INTERNALRESY);
+    if (nInternalX > 0 && nInternalY > 0)
+    {
+        nWidth = nInternalX;
+        nHeight = nInternalY;
+    }
 
     SetBufferSize(nWidth, nHeight);
     shCreateEffectBuffers.thiscall<void>(pThis);

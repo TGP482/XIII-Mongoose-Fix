@@ -10,6 +10,7 @@ export module maxfps;
 import common;
 import settings;
 import logging;
+import display;
 
 // The main loop ends every frame with appSleep(1/GetMaxTickRate - elapsed), and appSleep is a
 // plain Sleep(ms): whole milliseconds, stretched to the next scheduler tick, which is why a 60 cap
@@ -24,6 +25,21 @@ static constexpr auto fStockMaxTickRate = 120.0f;
 static constexpr auto fNoEngineWait = 10000.0f;
 
 static std::atomic<int> nMaxFrameRate = 0;
+static std::atomic<int> nRefreshRate = 60;
+
+// A cap of 1 means the monitor. Read per device reset too - fullscreen picks its own mode.
+static void ReadRefreshRate()
+{
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    const auto bNamed = GetMonitorInfoW(MonitorFromWindow(FindGameWindow(), MONITOR_DEFAULTTOPRIMARY), &monitor) != 0;
+
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+
+    if (EnumDisplaySettingsW(bNamed ? monitor.szDevice : nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+        nRefreshRate = static_cast<int>(mode.dmDisplayFrequency);
+}
 
 static SafetyHookInline shGetMaxTickRate{};
 
@@ -79,7 +95,8 @@ static float __fastcall GetMaxTickRate(void* pThis, void*)
     if (fOriginal != fStockMaxTickRate)
         return fOriginal;
 
-    PaceFrame(nMaxFrameRate.load());
+    const auto nCap = nMaxFrameRate.load();
+    PaceFrame(nCap == 1 ? nRefreshRate.load() : nCap);
     return fNoEngineWait;
 }
 
@@ -102,6 +119,9 @@ static void InitEngine()
 
     shGetMaxTickRate = safetyhook::create_inline(pGetMaxTickRate, GetMaxTickRate);
     BindInt(nMaxFrameRate, PREF_MAXFRAMERATE);
+
+    ReadRefreshRate();
+    onDeviceResetEvent() += []() { ReadRefreshRate(); };
 }
 
 class MaxFrameRate

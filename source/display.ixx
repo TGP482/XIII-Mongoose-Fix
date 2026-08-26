@@ -15,18 +15,29 @@ import internalres;
 // Field offsets, all from D3DDrv.dll:
 //   +0x0D8  UseVSync            config bool the game has but only honours fullscreen
 //   +0x178  MaxAnisotropy       fetched from D3DCAPS8 at Init, never used by the game
-//   +0x64C  bFullscreen
 //   +0x660  RefreshRate         picked by SetRes, written into present parameters
 //   +0x658  SizeX
 //   +0x65C  SizeY
 //   +0x66C  IDirect3DDevice8*
 static constexpr auto nOffsetUseVSync = 0xD8;
 static constexpr auto nOffsetMaxAnisotropy = 0x178;
-static constexpr auto nOffsetFullscreen = 0x64C;
 static constexpr auto nOffsetRefreshRate = 0x660;
 static constexpr auto nOffsetSizeX = 0x658;
 static constexpr auto nOffsetSizeY = 0x65C;
 static constexpr auto nOffsetDevice = 0x66C;
+
+// The game knows fullscreen or a plain window only, so borderless is a windowed device with the
+// frame off and the window snapped to the monitor.
+static constexpr auto nModeWindowed = 0;
+static constexpr auto nModeBorderless = 1;
+static constexpr auto nModeFullscreen = 2;
+
+static LONG nSavedStyle = 0;
+static LONG nSavedExStyle = 0;
+static bool bModeApplied = false;
+static HWND hGameWindow = nullptr;
+static int nOutputWidth = 0;
+static int nOutputHeight = 0;
 
 static uint8_t* pRenderDevice = nullptr;
 static void* pLastViewport = nullptr;
@@ -71,17 +82,128 @@ static std::unique_ptr<raw_mem> patchWindowedSwapEffect;
 // says. Scoring by -refresh instead takes the highest the monitor offers.
 static std::unique_ptr<raw_mem> patchRefreshPreference;
 
+// The viewport window can be a child, and a child ignores WS_POPUP: styles go on the top level.
+static HWND GameWindow()
+{
+    if (!hGameWindow || !IsWindow(hGameWindow))
+    {
+        const auto hFound = FindGameWindow();
+        hGameWindow = hFound ? GetAncestor(hFound, GA_ROOT) : nullptr;
+    }
+
+    return hGameWindow;
+}
+
+static bool MonitorRect(HWND hWindow, RECT& rect)
+{
+    MONITORINFO monitor{ sizeof(monitor) };
+    if (!GetMonitorInfoW(MonitorFromWindow(hWindow, MONITOR_DEFAULTTOPRIMARY), &monitor))
+        return false;
+
+    rect = monitor.rcMonitor;
+    return true;
+}
+
+// The monitor the game is on; the primary one until the window exists.
+static void MonitorSize(int& nX, int& nY)
+{
+    MONITORINFO monitor{ sizeof(monitor) };
+    if (GetMonitorInfoW(MonitorFromWindow(GameWindow(), MONITOR_DEFAULTTOPRIMARY), &monitor))
+    {
+        nX = monitor.rcMonitor.right - monitor.rcMonitor.left;
+        nY = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+    }
+}
+
+// Fullscreen leaves the window to the game; the other two put the frame on or off.
+static void ApplyDisplayMode(int nMode, int nWidth, int nHeight)
+{
+    if (nMode == nModeFullscreen)
+    {
+        bModeApplied = true;
+        return;
+    }
+
+    // First SetRes runs before the window exists; Present retries until it does.
+    const auto hWindow = GameWindow();
+    if (!hWindow)
+        return;
+
+    bModeApplied = true;
+
+    if (!nSavedStyle)
+    {
+        nSavedStyle = GetWindowLongW(hWindow, GWL_STYLE);
+        nSavedExStyle = GetWindowLongW(hWindow, GWL_EXSTYLE);
+    }
+
+    if (nMode == nModeBorderless)
+    {
+        RECT rect{};
+        if (!MonitorRect(hWindow, rect))
+            return;
+
+        const auto nStyle = (nSavedStyle & ~(WS_CAPTION | WS_BORDER | WS_DLGFRAME | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)) | WS_POPUP;
+
+        // The game drops its mouse capture whenever the window moves, so touch nothing if correct.
+        RECT window{};
+        if (GetWindowLongW(hWindow, GWL_STYLE) == nStyle && GetWindowRect(hWindow, &window) && EqualRect(&window, &rect))
+            return;
+
+        SetWindowLongW(hWindow, GWL_STYLE, nStyle);
+        SetWindowLongW(hWindow, GWL_EXSTYLE, nSavedExStyle & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE));
+
+        SetWindowPos(hWindow, HWND_TOP, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+            SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+
+        // The clip still points at the old rect and is only redone when the game next takes the
+        // mouse; until then the cursor is trapped off the client area.
+        ClipCursor(nullptr);
+
+        return;
+    }
+
+    RECT client{};
+    if (GetWindowLongW(hWindow, GWL_STYLE) == nSavedStyle && GetClientRect(hWindow, &client)
+        && client.right == nWidth && client.bottom == nHeight)
+        return;
+
+    SetWindowLongW(hWindow, GWL_STYLE, nSavedStyle);
+    SetWindowLongW(hWindow, GWL_EXSTYLE, nSavedExStyle);
+
+    // Back buffer size is the client area, not the window.
+    RECT rect{ 0, 0, nWidth, nHeight };
+    AdjustWindowRect(&rect, nSavedStyle, FALSE);
+
+    SetWindowPos(hWindow, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+    ClipCursor(nullptr);
+}
+
 static void ResolveDesiredResolution(int& nX, int& nY)
 {
+    auto nMonitorX = GetSystemMetrics(SM_CXSCREEN);
+    auto nMonitorY = GetSystemMetrics(SM_CYSCREEN);
+    MonitorSize(nMonitorX, nMonitorY);
+
+    // Borderless covers the monitor and a windowed present stretches a mismatched back buffer.
+    // Render lower through InternalResolution instead.
+    if (MongooseFixSettings.GetInt(PREF_DISPLAYMODE) == nModeBorderless)
+    {
+        nX = nMonitorX;
+        nY = nMonitorY;
+        return;
+    }
+
     auto nSettingX = MongooseFixSettings.GetInt(PREF_RESOLUTIONX);
     auto nSettingY = MongooseFixSettings.GetInt(PREF_RESOLUTIONY);
 
-    // 0 on an axis means the desktop: the only sensible default, and the one thing the game's own
-    // resolution list cannot offer.
+    // 0 on an axis means the desktop - the one thing the game's own list cannot offer.
     if (nSettingX == 0)
-        nSettingX = GetSystemMetrics(SM_CXSCREEN);
+        nSettingX = nMonitorX;
     if (nSettingY == 0)
-        nSettingY = GetSystemMetrics(SM_CYSCREEN);
+        nSettingY = nMonitorY;
 
     if (nSettingX > 0 && nSettingY > 0)
     {
@@ -92,6 +214,10 @@ static void ResolveDesiredResolution(int& nX, int& nY)
 
 static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int nY, int nFullscreen)
 {
+    // The setting decides the mode, whatever the caller asked.
+    const auto nMode = MongooseFixSettings.GetInt(PREF_DISPLAYMODE);
+    nFullscreen = nMode == nModeFullscreen ? 1 : 0;
+
     pRenderDevice = pThis;
     pLastViewport = pViewport;
     nLastFullscreen = nFullscreen;
@@ -114,15 +240,23 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     if (patchWindowedSwapEffect)
         patchWindowedSwapEffect->Restore();
 
+    nOutputWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
+    nOutputHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
+
+    // Ahead of ApplyInternalRes, while the sizes are still the output size.
+    bModeApplied = false;
+    ApplyDisplayMode(nMode, nOutputWidth, nOutputHeight);
+
     // Stamps the internal render size over SizeX/SizeY, so the read below reports it.
     ApplyInternalRes(pThis, reinterpret_cast<uint8_t*>(pViewport));
 
     nBackBufferWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
     nBackBufferHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
 
+    static constexpr const char* aszMode[] = { "windowed", "borderless", "fullscreen" };
+
     LogInfo("Display: {}x{} {} {} Hz, vsync {}", nBackBufferWidth.load(), nBackBufferHeight.load(),
-        *reinterpret_cast<int*>(pThis + nOffsetFullscreen) ? "fullscreen" : "windowed",
-        *reinterpret_cast<int*>(pThis + nOffsetRefreshRate), bVSync ? "on" : "off");
+        aszMode[nMode], *reinterpret_cast<int*>(pThis + nOffsetRefreshRate), bVSync ? "on" : "off");
 
     onDeviceResetEvent().executeAll();
     return nResult;
@@ -141,6 +275,9 @@ static void __fastcall Present(uint8_t* pThis, void*, void* pViewport)
         // Straight back through our own hook, so the vsync and resolution work happens once.
         SetRes(pThis, nullptr, pLastViewport ? pLastViewport : pViewport, nX, nY, nLastFullscreen);
     }
+
+    if (!bModeApplied)
+        ApplyDisplayMode(MongooseFixSettings.GetInt(PREF_DISPLAYMODE), nOutputWidth, nOutputHeight);
 
     PresentInternalRes(pThis);
     shPresent.fastcall<void>(pThis, nullptr, pViewport);

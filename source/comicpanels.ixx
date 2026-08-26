@@ -29,12 +29,13 @@ static constexpr auto nIndexHeight = 4;
 
 static SafetyHookMid mhRenderTargetUpdate{};
 
-// Powers of two only: the atlas is a render target, the driver may refuse an odd size.
+// Powers of two only - render target, an odd size may be refused. Rounded up, not down: the
+// largest power of two under the render height leaves a panel below 1:1.
 static int AtlasSize()
 {
     auto nSize = nAuthoredAtlas;
 
-    while (nSize < nMaxAtlas && nSize * 2 <= nBackBufferHeight.load())
+    while (nSize < nMaxAtlas && nSize < nBackBufferHeight.load())
         nSize *= 2;
 
     return nSize;

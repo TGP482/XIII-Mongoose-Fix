@@ -10,6 +10,7 @@ import common;
 
 export enum Pref
 {
+    PREF_DISPLAYMODE,
     PREF_RESOLUTIONX,
     PREF_RESOLUTIONY,
     PREF_VSYNC,
@@ -42,6 +43,9 @@ public:
     {
         CIniReader iniReader("");
 
+        // (0) windowed, (1) borderless, (2) fullscreen.
+        mPrefs[PREF_DISPLAYMODE] = std::clamp(iniReader.ReadInteger("Display", "DisplayMode", 2), 0, 2);
+
         // 0 on either axis means the desktop.
         auto nResolutionX = iniReader.ReadInteger("Display", "ResolutionX", 0);
         auto nResolutionY = iniReader.ReadInteger("Display", "ResolutionY", 0);
@@ -70,7 +74,7 @@ public:
         mPrefs[PREF_MOUSESMOOTHING] = std::clamp(iniReader.ReadInteger("Input", "MouseSmoothing", 0), 0, 1);
 
         auto fMouseSensitivity = iniReader.ReadFloat("Input", "MouseSensitivity", 1.0f);
-        mPrefs[PREF_MOUSESENSITIVITY] = fMouseSensitivity <= 0.0f ? 1.0f : std::clamp(fMouseSensitivity, 0.01f, 10.0f);
+        mPrefs[PREF_MOUSESENSITIVITY] = fMouseSensitivity <= 0.0f ? 1.0f : std::clamp(fMouseSensitivity, 0.01f, 20.0f);
 
         mPrefs[PREF_FIELDOFVIEW] = std::clamp(iniReader.ReadFloat("FieldOfView", "FieldOfView", fStockFieldOfView), 45.0f, 145.0f);
 

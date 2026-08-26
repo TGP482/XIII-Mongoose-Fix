@@ -17,9 +17,10 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 ## Features
 
 ### Display
+- **Display Mode** - Chooses between fullscreen, borderless and windowed.
 - **Resolution** - Sets the game's resolution, with 0 using your desktop resolution.
 - **V-Sync** - Restores V-Sync support in windowed mode, which the game only ever applied in fullscreen.
-- **Max Frame Rate** - 
+- **Max Frame Rate** - Caps the game's frame rate either at your monitor's refresh rate automatically or at a value you pick.
 
 ### Graphics
 - **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures.
