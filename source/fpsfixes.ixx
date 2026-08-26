@@ -122,12 +122,144 @@ static int __fastcall PlayerTick(void* pThis, void*, float fDelta, int nTickType
     return Tick(shPlayerTick, pThis, fDelta, nTickType, pThis && !strcmp(StateName(pThis), "NoControl"));
 }
 
+// MoveActor sweeps 2 units past the requested delta, then parks the actor 2 units short of the
+// impact. Blocked move returns Delta minus 2. Anything under 2 units returns nothing. Fixed loss
+// per call, call count scales with frame rate: 60 uu/s at 30 fps, 480 uu/s at 240, past walk
+// speed. In a gap the pawn grazes a surface every frame, so unlocked it never advances.
+// Walking and falling share one 1/30 accumulator, drawn position lerps the last two steps, same
+// shape as the softbody and camera fixes in the Splinter Cell fix. Shared accumulator carries
+// leftover time through a takeoff or a landing instead of dropping a step at each.
+static constexpr auto fFixedStep = 1.0f / 30.0f;
+static constexpr auto nMaxSteps = 8;
+static constexpr auto nOffsetLocation = 0xCC;
+static constexpr auto nOffsetPhysics = 0x38;
+static constexpr uint8_t nPhysWalking = 1;
+static constexpr uint8_t nPhysFalling = 2;
+
+static SafetyHookInline shPhysWalking{};
+static SafetyHookInline shPhysFalling{};
+static int(__thiscall* pIsHumanControlled)(void*) = nullptr;
+
+static auto bStepping = false;
+
+struct FVector { float X, Y, Z; };
+
+static FVector& Location(void* pPawn)
+{
+    return *reinterpret_cast<FVector*>(static_cast<uint8_t*>(pPawn) + nOffsetLocation);
+}
+
+static uint8_t Physics(void* pPawn)
+{
+    return *(static_cast<uint8_t*>(pPawn) + nOffsetPhysics);
+}
+
+static FVector Lerp(const FVector& a, const FVector& b, float t)
+{
+    return { a.X + t * (b.X - a.X), a.Y + t * (b.Y - a.Y), a.Z + t * (b.Z - a.Z) };
+}
+
+static void Advance(void* pPawn, float fDelta, int nIterations)
+{
+    static FVector vBack{}, vFront{}, vDrawn{};
+    static auto fPending = 0.0f;
+    static auto bHeld = false;
+
+    // Anything else that moved the pawn wins: teleports, movers, script.
+    auto& vLocation = Location(pPawn);
+    if (!bHeld || vLocation.X != vDrawn.X || vLocation.Y != vDrawn.Y || vLocation.Z != vDrawn.Z)
+    {
+        vBack = vFront = vLocation;
+        fPending = 0.0f;
+    }
+    else
+    {
+        vLocation = vFront;
+    }
+
+    bHeld = false;
+    fPending += fDelta;
+
+    auto nSteps = 0;
+    while (fPending >= fFixedStep && nSteps < nMaxSteps)
+    {
+        fPending -= fFixedStep;
+        nSteps++;
+    }
+
+    if (nSteps == nMaxSteps)
+        fPending = 0.0f;
+
+    bStepping = true;
+    for (auto i = 0; i < nSteps; i++)
+    {
+        vBack = vFront;
+
+        // State can flip inside a step. Pick the handler per step, not per frame.
+        auto& sh = Physics(pPawn) == nPhysFalling ? shPhysFalling : shPhysWalking;
+        sh.fastcall<void>(pPawn, nullptr, fFixedStep, nIterations);
+
+        vFront = vLocation;
+    }
+    bStepping = false;
+
+    // Other states drive the pawn themselves. Hand it back untouched.
+    const auto nPhysics = Physics(pPawn);
+    if (nPhysics != nPhysWalking && nPhysics != nPhysFalling)
+    {
+        fPending = 0.0f;
+        return;
+    }
+
+    // ponytail: raw write, no collision hash update. Interpolated offset never exceeds one 1/30
+    // step, hash buckets far coarser, entry stays correct. Route through MoveActor if a trace is
+    // ever seen missing the player.
+    vDrawn = vLocation = Lerp(vBack, vFront, fPending / fFixedStep);
+    bHeld = true;
+}
+
+// startNewPhysics re-enters these from inside a step. Only the outermost call accumulates.
+static bool Passthrough(void* pPawn, float fDelta)
+{
+    return bStepping || !pPawn || !(fDelta > 0.0f) || !pIsHumanControlled(pPawn);
+}
+
+static void __fastcall PhysWalking(void* pThis, void*, float fDelta, int nIterations)
+{
+    if (Passthrough(pThis, fDelta))
+        return shPhysWalking.fastcall<void>(pThis, nullptr, fDelta, nIterations);
+
+    Advance(pThis, fDelta, nIterations);
+}
+
+static void __fastcall PhysFalling(void* pThis, void*, float fDelta, int nIterations)
+{
+    if (Passthrough(pThis, fDelta))
+        return shPhysFalling.fastcall<void>(pThis, nullptr, fDelta, nIterations);
+
+    Advance(pThis, fDelta, nIterations);
+}
+
 static void InitEngine()
 {
     auto hEngine = GetModuleHandleW(L"Engine.dll");
     auto hCore = GetModuleHandleW(L"Core.dll");
     if (!hEngine || !hCore)
         return;
+
+    auto pPhysWalking = GetProcAddress(hEngine, "?physWalking@APawn@@QAEXMH@Z");
+    auto pPhysFalling = GetProcAddress(hEngine, "?physFalling@APawn@@UAEXMH@Z");
+    pIsHumanControlled = reinterpret_cast<decltype(pIsHumanControlled)>(GetProcAddress(hEngine, "?IsHumanControlled@APawn@@QAEHXZ"));
+
+    if (!pPhysWalking || !pPhysFalling || !pIsHumanControlled)
+    {
+        LogWarn("FpsFixes: an export is missing, walking and falling stay frame rate dependent");
+    }
+    else
+    {
+        shPhysWalking = safetyhook::create_inline(pPhysWalking, PhysWalking);
+        shPhysFalling = safetyhook::create_inline(pPhysFalling, PhysFalling);
+    }
 
     auto pClamp = GetProcAddress(hCore, "?execClamp@UObject@@QAEXAAUFFrame@@QAX@Z");
     auto pActorTick = GetProcAddress(hEngine, "?Tick@AActor@@UAEHMW4ELevelTick@@@Z");

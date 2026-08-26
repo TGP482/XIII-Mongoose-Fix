@@ -77,11 +77,25 @@ static void WriteDump(EXCEPTION_POINTERS* pInfo)
         path.filename().string());
 }
 
+// IsBadReadPtr and IsBadWritePtr test a pointer by touching it and catching the fault, and
+// safetyhook probes that way before unhooking an object the game may already have freed. Handed a
+// released D3D device it faults, catches it, answers no, and carries on. A vectored handler sees
+// that first chance and would kill the process over a question that was already answered.
+static bool IsProbe(const void* pAddress)
+{
+    HMODULE hModule = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCWSTR>(pAddress), &hModule))
+        return false;
+
+    return hModule == GetModuleHandleW(L"kernel32.dll") || hModule == GetModuleHandleW(L"kernelbase.dll");
+}
+
 static LONG CALLBACK OnException(EXCEPTION_POINTERS* pInfo)
 {
     const auto pRecord = pInfo ? pInfo->ExceptionRecord : nullptr;
 
-    if (!pRecord || !Fatal(pRecord->ExceptionCode))
+    if (!pRecord || !Fatal(pRecord->ExceptionCode) || IsProbe(pRecord->ExceptionAddress))
         return EXCEPTION_CONTINUE_SEARCH;
 
     LogWarn("CrashDump: exception 0x{:08X} at 0x{:08X}", pRecord->ExceptionCode,

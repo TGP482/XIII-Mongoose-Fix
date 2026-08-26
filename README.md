@@ -40,6 +40,7 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 - Fixed an issue where mouse sensitivity changed with the field of view.
 - Fixed HUD elements, menus, blur effects and comic panels not scaling properly with resolution.
 - Fixed the cutscene camera never turning onto its focus target above 162 fps, leaving the shot pointed at whatever angle it started on.
+- Fixed getting stuck when squeezing through narrow gaps at high frame rates.
 
 ### Credits
 - [ThirteenAG](https://github.com/ThirteenAG) - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)
