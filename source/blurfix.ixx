@@ -9,7 +9,7 @@ import settings;
 import logging;
 
 // Blur and sharpen render the frame into an offscreen target, blur it, stretch it back. D3DDrv
-// creates that target flat 512x512 - one buffer pixel per five screen pixels at 2560x1440, hence
+// creates that target flat 512x512, one buffer pixel per five screen pixels at 2560x1440, hence
 // the block edges in flashbacks. Three immediates decide it:
 //
 //   CreateTexture(512, 512, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &colour)
@@ -74,7 +74,7 @@ static void __fastcall CreateEffectBuffers(uint8_t* pThis, void*)
     shCreateEffectBuffers.thiscall<void>(pThis);
 
     // Non-power-of-two render targets are optional under D3D8 and the game never checks what
-    // CreateTexture returned - a refusal would crash on the first flashback instead of here.
+    // CreateTexture returned, and a refusal would crash on the first flashback instead of here.
     if (*reinterpret_cast<void**>(pRenderDevice + nOffsetEffectTexture) == nullptr ||
         *reinterpret_cast<void**>(pRenderDevice + nOffsetGlowTexture) == nullptr)
     {
@@ -100,7 +100,7 @@ static void __fastcall BindEffectTarget(uint8_t* pThis, void*)
 
 static void InitD3DDrv()
 {
-    // PUSH 0x200 / PUSH 0x200 / PUSH ESI / CALL [ECX+0x50] - height, width, device, then
+    // PUSH 0x200 / PUSH 0x200 / PUSH ESI / CALL [ECX+0x50]: height, width, device, then
     // IDirect3DDevice8::CreateTexture. Depth surface is the same shape one slot along at
     // CALL [ECX+0x68], IDirect3DDevice8::CreateDepthStencilSurface.
     auto patternColour = module_pattern(L"D3DDrv.dll", "68 00 02 00 00 68 00 02 00 00 56 FF 51 50");

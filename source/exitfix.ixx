@@ -11,7 +11,7 @@ import logging;
 // fullscreen D3D8 teardown releases the device, restores the display mode and destroys the window
 // from inside the message handler while the loading animation thread is still alive. Windows does
 // all of that on process exit anyway, so the process is killed at the first point the game commits
-// to quitting - WM_CLOSE, which the viewport turns into an EXIT command, and appPreExit for the
+// to quitting: WM_CLOSE, which the viewport turns into an EXIT command, and appPreExit for the
 // menu's Quit. Nothing is lost: XIII writes options and saves as they change, not on exit.
 static SafetyHookInline shViewportWndProc{};
 static SafetyHookInline shAppPreExit{};

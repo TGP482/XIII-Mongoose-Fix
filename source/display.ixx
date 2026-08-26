@@ -199,7 +199,7 @@ static void ResolveDesiredResolution(int& nX, int& nY)
     auto nSettingX = MongooseFixSettings.GetInt(PREF_RESOLUTIONX);
     auto nSettingY = MongooseFixSettings.GetInt(PREF_RESOLUTIONY);
 
-    // 0 on an axis means the desktop - the one thing the game's own list cannot offer.
+    // 0 on an axis means the desktop, the one thing the game's own list cannot offer.
     if (nSettingX == 0)
         nSettingX = nMonitorX;
     if (nSettingY == 0)
@@ -300,14 +300,14 @@ static void InitD3DDrv()
         return;
     }
 
-    // LEA ECX,[ECX+ECX*1+1] / MOV [EBP-0x88],ECX - the swap effect written into present parameters.
+    // LEA ECX,[ECX+ECX*1+1] / MOV [EBP-0x88],ECX: the swap effect written into present parameters.
     auto patternSwapEffect = module_pattern(L"D3DDrv.dll", "8D 4C 09 01 89 8D 78 FF FF FF");
     if (!patternSwapEffect.empty())
         patchWindowedSwapEffect = std::make_unique<raw_mem>(patternSwapEffect.get_first(3), std::initializer_list<uint8_t>{ 0x02 });
     else
         LogWarn("Display: swap effect pattern not found, windowed vsync is off");
 
-    // SUB EAX,0x4B / JNS / NEG EAX - the abs distance to 75. NEG EAX alone leaves the score as
+    // SUB EAX,0x4B / JNS / NEG EAX: the abs distance to 75. NEG EAX alone leaves the score as
     // -refresh, so the highest mode wins the tie break.
     auto patternRefresh = module_pattern(L"D3DDrv.dll", "8B 44 13 08 03 DA 83 E8 4B 79 02 F7 D8");
     if (!patternRefresh.empty())

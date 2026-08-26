@@ -14,7 +14,7 @@ import display;
 // filter jumped.
 //
 // One raw registration per device per process, last caller wins. Ours replaces DirectInput's and
-// its stream stops dead - no axis, no buttons, frozen menu - so the deltas go back in through
+// its stream stops dead, no axis, no buttons, frozen menu, so the deltas go back in through
 // UWindowsViewport::CauseInputEvent, the door DirectInput used. Player, console and menu unchanged.
 //
 // Menu cursor per packet:  MouseX = (int)((float)(int)(Delta - 0.5) * MenuMouseSens + MouseX)
@@ -50,7 +50,7 @@ static void Queue(int nKey, int nAction, float fDelta)
         aEvents.push_back({ nKey, nAction, fDelta });
 }
 
-// The FOV factor the player's axes are multiplied by, ours to write - the patch below points the
+// The FOV factor the player's axes are multiplied by, ours to write, the patch below points the
 // engine's FLD here. Gameplay only; the menu never runs that code.
 static float fPlayerMouseScale = 1.0f;
 
@@ -70,7 +70,7 @@ static constexpr auto fMenuAuthoredHeight = 480.0f;
 
 static SafetyHookInline shUpdateInput{};
 
-// UWindowsViewport::CauseInputEvent(iKey, EInputAction, Delta) - WinDrv.dll. IST_Axis is 4.
+// UWindowsViewport::CauseInputEvent(iKey, EInputAction, Delta) in WinDrv.dll. IST_Axis is 4.
 using fnCauseInputEvent = int(__thiscall*)(void*, int, int, float);
 static fnCauseInputEvent pCauseInputEvent = nullptr;
 
@@ -86,7 +86,7 @@ static std::vector<std::unique_ptr<raw_mem>> patchNoMenuDeadzone;
 static HWND hRawInputWindow = nullptr;
 static std::atomic<bool> bRawInputReady = false;
 
-// RIDEV_INPUTSINK delivers with or without focus, so the focus test moves here - alt-tab still
+// RIDEV_INPUTSINK delivers with or without focus, so the focus test moves here, alt-tab still
 // stops movement.
 static bool ForegroundIsGame()
 {
@@ -243,7 +243,7 @@ static void __fastcall UpdateInput(void* pThis, void*, int bIsMainViewport)
         aPending.swap(aEvents);
     }
 
-    // Raw counts only. The menu scales by MenuMouseSens, the player by the factor above - the two
+    // Raw counts only. The menu scales by MenuMouseSens, the player by the factor above, the two
     // stay independent.
     for (const auto& event : aPending)
     {
@@ -270,7 +270,7 @@ static void InitEngine()
     if (!hEngine)
         return;
 
-    // MOV AL,[ECX+0x28] / TEST AL,1 - the bMaxMouseSmoothing test at the top of SmoothMouse, and
+    // MOV AL,[ECX+0x28] / TEST AL,1: the bMaxMouseSmoothing test at the top of SmoothMouse, and
     // the pass through tail to jump to instead.
     auto patternSmoothingTest = module_pattern(L"Engine.dll", "8A 41 28 A8 01 74 41 D9 44 24 08 D8 1D");
     auto patternPassThrough = module_pattern(L"Engine.dll", "8B 4C 24 08 8B 44 24 14 89 0A C7 00 00 00 00 00");
@@ -291,7 +291,7 @@ static void InitEngine()
         LogWarn("RawMouseInput: smoothing pattern not found, MouseSmoothing does nothing");
     }
 
-    // FLD [ESI+0x3AC] (DesiredFOV) / FMUL qword [0.01111] - the mouse scaled by field of view, so
+    // FLD [ESI+0x3AC] (DesiredFOV) / FMUL qword [0.01111]: the mouse scaled by field of view, so
     // widening the FOV quietly raises sensitivity. Both are replaced by a FLD of our own float, so
     // the FOV drops out and the factor is ours to set. Twelve bytes for twelve. Not a setting.
     auto patternFovScale = module_pattern(L"Engine.dll", "D9 86 AC 03 00 00 DC 0D ? ? ? ? 8B 46 7C");
@@ -328,7 +328,7 @@ static void InitGUI()
     if (!hGUI)
         return;
 
-    // FLD [ESP+0x28] (the axis delta) / FSUB [0.5] - once per axis. Not a setting: the deadzone
+    // FLD [ESP+0x28] (the axis delta) / FSUB [0.5]: once per axis. Not a setting: the deadzone
     // eats the smallest movement the mouse can report.
     auto patternDeadzone = module_pattern(L"GUI.dll", "D9 44 24 28 D8 25 ? ? ? ? DB 5C 24");
     if (patternDeadzone.empty())

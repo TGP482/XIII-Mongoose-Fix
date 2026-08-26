@@ -8,14 +8,14 @@ import common;
 import display;
 import logging;
 
-// A real time panel is not drawn from the world - the world renders into URenderTargetMaterial and
+// A real time panel is not drawn from the world: the world renders into URenderTargetMaterial and
 // the panel is a tile of it. That material is one 256x256 atlas shared by every panel, handed out
 // in 8 unit cells over a 32 bit mask, so a panel is a couple hundred texels however large it lands
 // on screen. Hence the blocks.
 //
 // The atlas texture and the size the material reports are separate: FCanvasUtil::DrawTile divides
 // texture coordinates by GetUSize/GetVSize, so leaving those at 256 keeps every number script has -
-// AllocRect cells, tile coordinates - and only Update's rect, which addresses real texels, grows
+// AllocRect cells, tile coordinates, and only Update's rect, which addresses real texels, grows
 // with the texture.
 //
 //   URenderTargetMaterial  +0x54 USize  +0x58 VSize  +0x64 FBaseTexture*  +0x68 32 dword cell mask
@@ -29,13 +29,16 @@ static constexpr auto nIndexHeight = 4;
 
 static SafetyHookMid mhRenderTargetUpdate{};
 
-// Powers of two only - render target, an odd size may be refused. Rounded up, not down: the
-// largest power of two under the render height leaves a panel below 1:1.
+// Powers of two only: render target, an odd size may be refused. Nearest, not up: FD3DTexture
+// caches a render target with a matching depth stencil, so the step past the render height costs
+// four times the memory of the one below it in D3DPOOL_DEFAULT, 134 MB at 4096, and that is what
+// runs the 32 bit process out on a device reset with MSAA and a full resolution effect buffer also
+// resident. 2048 against a 2160 line frame is a panel at 0.95:1.
 static int AtlasSize()
 {
     auto nSize = nAuthoredAtlas;
 
-    while (nSize < nMaxAtlas && nSize < nBackBufferHeight.load())
+    while (nSize < nMaxAtlas && nSize * 2 <= nBackBufferHeight.load())
         nSize *= 2;
 
     return nSize;

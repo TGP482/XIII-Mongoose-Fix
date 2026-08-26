@@ -62,6 +62,7 @@ public:
     static Event<>& onGUIInitEvent()    { static Event<> e; return e; }
     static Event<>& onCoreInitEvent()   { static Event<> e; return e; }
     static Event<>& onWinDrvInitEvent() { static Event<> e; return e; }
+    static Event<>& onWindowInitEvent() { static Event<> e; return e; }
 
     static Event<>& onIniFileChange()   { static Event<> e; return e; }
     static Event<>& onShutdownEvent()   { static Event<> e; return e; }
@@ -300,7 +301,7 @@ hook::pattern find_pattern(Args... args)
 // One module only: XIII spreads its code over five binaries, so a program-wide scan is slower and
 // ambiguous. An unloaded module gives an empty pattern, never a scan of whatever else is mapped.
 //
-// One wildcard byte is one "?" - Hooking.Patterns counts each question mark as a byte, so "??" is
+// One wildcard byte is one "?": Hooking.Patterns counts each question mark as a byte, so "??" is
 // two wildcards and never matches.
 export inline hook::pattern module_pattern(const wchar_t* module_name, std::string_view bytes)
 {

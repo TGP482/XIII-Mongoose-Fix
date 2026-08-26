@@ -54,7 +54,7 @@ static void HookDevice()
         return;
 
     // A reset keeps the same object and the hook with it. A recreate does not, so the hook is
-    // rebuilt - and the old one is torn down first. Building a new vmt hook over a live one would
+    // rebuilt, and the old one is torn down first. Building a new vmt hook over a live one would
     // take the fake vtable for the real one and then have the old hook put the real one back.
     vmSetTextureStageState = {};
     vmtDevice = {};

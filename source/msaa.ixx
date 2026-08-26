@@ -282,7 +282,7 @@ static void __fastcall ReadPixels(uint8_t* pThis, void*, uint8_t* pViewport, uin
     if (!pViewport || !pPixels)
         return;
 
-    // Never fall through to the original while MSAA is on - locking that surface is the crash.
+    // Never fall through to the original while MSAA is on, locking that surface is the crash.
     if (!CaptureFrontBuffer(pThis, pViewport, pPixels) && !bFailed.exchange(true))
         LogWarn("MSAA: the front buffer readback failed, MSAA goes off at the next device reset");
 }

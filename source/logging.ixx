@@ -255,7 +255,7 @@ static void LogSystemInfo()
     IsWow64Process(GetCurrentProcess(), &bWow64);
 
     const auto szHost = HostVersion();
-    LogInfo("OS: {} {}{}", OSVersion(), bWow64 ? "64-bit" : "32-bit", szHost.empty() ? std::string() : " - " + szHost);
+    LogInfo("OS: {} {}{}", OSVersion(), bWow64 ? "64-bit" : "32-bit", szHost.empty() ? std::string() : " on " + szHost);
     LogShimmedVersion();
 
     SYSTEM_INFO system{};

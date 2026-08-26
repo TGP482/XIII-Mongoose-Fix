@@ -13,6 +13,7 @@ import fov;
 import maxfps;
 import rawmouse;
 import comicpanels;
+import crashdump;
 import blurfix;
 import menuscale;
 import hudscale;
@@ -39,6 +40,7 @@ extern "C"
             CallbackHandler::RegisterCallback(L"GUI.dll", []() { MongooseFix::onGUIInitEvent().executeAll(); });
             CallbackHandler::RegisterCallback(L"Core.dll", []() { MongooseFix::onCoreInitEvent().executeAll(); });
             CallbackHandler::RegisterCallback(L"WinDrv.dll", []() { MongooseFix::onWinDrvInitEvent().executeAll(); });
+            CallbackHandler::RegisterCallback(L"Window.dll", []() { MongooseFix::onWindowInitEvent().executeAll(); });
         });
     }
 }

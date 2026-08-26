@@ -9,14 +9,14 @@ import logging;
 import menuscale;
 
 // The HUD draws in raw screen pixels. For the length of the pass the canvas reports a 480 unit
-// tall screen - what the HUD was drawn against - and every quad back out is multiplied up. Text
+// tall screen, what the HUD was drawn against, and every quad back out is multiplied up. Text
 // comes along: glyphs are quads through the same function, pen advance in the same units.
 //
 // Works because every HUD tile and glyph reaches FCanvasUtil::DrawTile (exported; first four args
 // are the corners in absolute screen pixels), AHUD::eventPostRender is exported and called from
 // one place, and UCanvas::Update runs once a frame before the pass.
 //
-// Menus need a real ClipX - script hit tests against a real-pixel mouse - so only their text is
+// Menus need a real ClipX, script hit tests against a real-pixel mouse, so only their text is
 // scaled, in two places that must agree or centred labels drift: the quads a string emits, about
 // the string start, and both outputs of the per character metrics primitive behind TextSize.
 //
@@ -57,7 +57,7 @@ static SafetyHookInline shSetOrigin{};
 static constexpr auto nOffsetArgX = 0x08;   // __thiscall: return address, UMaterial*, X, Y
 static constexpr auto nOffsetArgY = 0x0C;
 
-// 0xA0, DrawTileStretched, is taken over whole rather than nudged - see below.
+// 0xA0, DrawTileStretched, is taken over whole rather than nudged, see below.
 static constexpr int aOriginBlindSlots[] = { 0x84, 0x88, 0xA4, 0xA8, 0xAC, 0xB0 };
 static SafetyHookMid amhOriginBlind[std::size(aOriginBlindSlots)]{};
 static SafetyHookMid mhDrawTile{};
@@ -71,8 +71,8 @@ static std::atomic<float> fHudScale = 1.0f;
 static std::atomic<bool> bGuiPass = false;
 static std::atomic<float> fGuiScale = 1.0f;
 
-// The interface box is 640x480 times one scale, and neither of script's uses of ClipX - the
-// ratios, the right edge of anything page-wide - wants the screen. The real values are kept for
+// The interface box is 640x480 times one scale, and neither of script's uses of ClipX, the
+// ratios, the right edge of anything page-wide, wants the screen. The real values are kept for
 // the HUD pass, which lays out against the screen even inside this one.
 static std::atomic<bool> bGuiClamped = false;
 static std::atomic<float> fRealClipX = 0.0f;
@@ -130,7 +130,7 @@ static void DrawTriangle(SafetyHookContext& ctx)
 }
 
 // Box outlines are line strokes, one pixel wide however large the box, and there is no width to
-// set - so the stroke is laid down repeatedly, stepped along its perpendicular, in one batch. HUD
+// set, so the stroke is laid down repeatedly, stepped along its perpendicular, in one batch. HUD
 // coordinates are virtual and move as well as thicken; interface ones are already real.
 static void __fastcall DrawLine(uint8_t* pThis, void*, float fX1, float fY1, float fX2, float fY2,
     uint32_t nColour, int nStyle)
@@ -146,7 +146,7 @@ static void __fastcall DrawLine(uint8_t* pThis, void*, float fX1, float fY1, flo
         fY2 *= fScale;
     }
 
-    // The authored border is two pixels - UCanvas::DrawTile lays the ring down twice.
+    // The authored border is two pixels: UCanvas::DrawTile lays the ring down twice.
     const auto nStrokes = std::clamp(static_cast<int>(fScale * 2.0f + 0.5f), 1, 32);
     const auto fLength = std::sqrt((fX2 - fX1) * (fX2 - fX1) + (fY2 - fY1) * (fY2 - fY1));
 
@@ -176,7 +176,7 @@ static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pR
         return;
 
     // A message box's geometry is pixels, but like every window it sets the origin from WinLeft as
-    // a fraction of the page - 990 gives 2,851,680. Harmless until the seven draws began honouring
+    // a fraction of the page, 990 gives 2,851,680. Harmless until the seven draws began honouring
     // the origin. Panel, backdrop, controls and captions are all absolute screen pixels, so zero
     // is right: anything else moves the ones that read the origin and strands the captions, which
     // do not.
@@ -234,8 +234,8 @@ static void AddOrigin(SafetyHookContext& ctx)
 
         nMsgboxQuad++;
 
-        // Geometry is screen coordinates now - menuscale centres the box there, since the GUI
-        // natives drawing its caption and buttons read WinLeft straight - so no offset here.
+        // Geometry is screen coordinates now, menuscale centres the box there, since the GUI
+        // natives drawing its caption and buttons read WinLeft straight, so no offset here.
         if (bMsgboxSelfPlaced)
             return;
     }
@@ -456,8 +456,8 @@ static float InterfaceScale(uint8_t* pCanvas)
     return (std::min)(fClipX / fAuthoredWidth, fClipY / fAuthoredHeight);
 }
 
-// Two menu draws are not part of the 4:3 page - the objectives band and the pause panel's black
-// surround bars - and stopping them at the box leaves a strip of game showing at each end.
+// Two menu draws are not part of the 4:3 page, the objectives band and the pause panel's black
+// surround bars, and stopping them at the box leaves a strip of game showing at each end.
 //
 // The canvas cannot identify them: every control sets the origin to its own corner and the clip to
 // its own size, so a button background also starts where the canvas starts. The screen can: the
@@ -525,7 +525,7 @@ static void __fastcall CanvasDrawTile(uint8_t* pCanvas, void*, void* pMaterial,
 }
 
 // Frames around engine-drawn controls are nine slices, and DrawTileStretched takes the border size
-// as half the material's USize and VSize - 16 pixels at every resolution for a 32x32 style texture.
+// as half the material's USize and VSize, 16 pixels at every resolution for a 32x32 style texture.
 // Script's BorderOffsets is never read natively, hence scaling it did nothing. Corner size, middle
 // span and texture coordinates all derive from that one figure, so there is no number to patch:
 // the slices are emitted here instead, border scaled, source rectangles left alone.
@@ -798,7 +798,7 @@ static void InitEngine()
     // the function that turns a string into quads. Not exported, unlike everything around it.
     auto patternDrawString = module_pattern(L"Engine.dll", "83 EC 48 53 55 8B 6C 24 58 56 8D 5D 2C 57 8B CB");
 
-    // MOV ECX,[ESI+0xC] / MOV [EBP],ECX / POP EDI / POP ESI / POP EBP / POP EBX / RET - hooked at
+    // MOV ECX,[ESI+0xC] / MOV [EBP],ECX / POP EDI / POP ESI / POP EBP / POP EBX / RET: hooked at
     // the POPs, where both out pointers are still reachable. The height's argument slot is scratch
     // by then, so EBP is the only copy left.
     auto patternCharSize = module_pattern(L"Engine.dll", "8B 4E 0C 89 4D 00 5F 5E 5D 5B C3");

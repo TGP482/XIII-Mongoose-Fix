@@ -7,7 +7,7 @@ modified; removing the plugin puts the game back as it was.
 
 1. Extract the archive into the game folder, so `dinput8.dll` sits next to `XIII.exe` and
    `XIIIMongooseFix.asi` sits in `system\plugins`.
-2. Edit `system\plugins\XIIIMongooseFix.ini` to taste. Every setting is live — save the file with
+2. Edit `system\plugins\XIIIMongooseFix.ini` to taste. Every setting is live - save the file with
    the game running and it applies straight away.
 
 ### In this release

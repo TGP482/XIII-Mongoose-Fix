@@ -15,8 +15,8 @@ import logging;
 //   Play()                                         +0x78
 //   while (uiGetStatus()) Tick(0)                  +0x98 / +0x6C
 //
-// Failing the open is not enough - the chain does not read that as "done, move to the next" and
-// sits on a black screen - so all three are jumped over, from the PUSH of "ubi" to the first
+// Failing the open is not enough, the chain does not read that as "done, move to the next" and
+// sits on a black screen, so all three are jumped over, from the PUSH of "ubi" to the first
 // instruction past the third Tick loop, 0x165 bytes on. Jump and PUSH are both five bytes.
 static constexpr auto nIntroBlockLength = 0x165;
 
@@ -24,7 +24,7 @@ static std::unique_ptr<raw_mem> patchSkipIntro;
 
 static void Init()
 {
-    // PUSH "ubi" / MOV EDX,[EBP-0x148] / MOV ECX,[EDX+0x60] / ... / CALL [EAX+0x74] - the first
+    // PUSH "ubi" / MOV EDX,[EBP-0x148] / MOV ECX,[EDX+0x60] / ... / CALL [EAX+0x74]: the first
     // Open. The later two blocks use a different register order, so this matches once.
     auto patternIntro = module_pattern(nullptr, "68 ? ? ? ? 8B 95 B8 FE FF FF 8B 4A 60 8B 85 B8 FE FF FF 8B 50 60 8B 02 FF 50 74");
     if (patternIntro.empty())

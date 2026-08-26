@@ -27,7 +27,7 @@ static constexpr auto fNoEngineWait = 10000.0f;
 static std::atomic<int> nMaxFrameRate = 0;
 static std::atomic<int> nRefreshRate = 60;
 
-// A cap of 1 means the monitor. Read per device reset too - fullscreen picks its own mode.
+// A cap of 1 means the monitor. Read per device reset too, fullscreen picks its own mode.
 static void ReadRefreshRate()
 {
     MONITORINFOEXW monitor{};

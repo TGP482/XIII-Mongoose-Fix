@@ -13,11 +13,11 @@ import logging;
 // XIIIWindow.InternalOn* and the four control classes pillarbox the rest with
 // if (ClipX > 800) SetOrigin((ClipX-800)/2, ...), the mouse hit test included.
 //
-// All constant operands in the package bytecode, patched in place - nothing inserted, no jump
+// All constant operands in the package bytecode, patched in place, nothing inserted, no jump
 // moved:
 //
 //   BeforePaint's 800/600   1e9, so FClamp returns what it was handed.
-//   800/600 elsewhere       640*scale, 480*scale - the centring those branches meant, and equal to
+//   800/600 elsewhere       640*scale, 480*scale, the centring those branches meant, and equal to
 //                           ClipX/ClipY on 4:3, so the tests go false.
 //   DisplayHelpBar          the one part in raw screen pixels (32 tall, 30 in from each edge, 6
 //                           from the bottom, 28 pixel icons, 3 pixel gap). One byte each, so past
@@ -44,14 +44,14 @@ static constexpr auto nOffsetScriptNum = 0x4C;
 static constexpr auto fAuthoredWidth = 640.0f;
 static constexpr auto fAuthoredHeight = 480.0f;
 
-// Where every PC message box opens, in 640x480 units. Not page centre - the pause panel uses the
+// Where every PC message box opens, in 640x480 units. Not page centre: the pause panel uses the
 // same corner and both must agree.
 static constexpr auto fMsgBoxOrgX = 220.0f;
 static constexpr auto fMsgBoxOrgY = 130.0f;
 
 // EX_IntConst 0x1D, EX_FloatConst 0x1E, each plus four little endian bytes. Which one a literal
-// became is not obvious from the source - 800 in float arithmetic folds to a float, the 800 in
-// "C.ClipX > 800" stays an int behind a cast - so both are looked for.
+// became is not obvious from the source: 800 in float arithmetic folds to a float, the 800 in
+// "C.ClipX > 800" stays an int behind a cast, so both are looked for.
 static constexpr uint8_t nIntConst = 0x1D;
 static constexpr uint8_t nFloatConst = 0x1E;
 static constexpr auto nConstSize = 5;
@@ -113,6 +113,7 @@ struct Site
     Live eKind;
     bool bFloat;
     float fAuthored;
+    uint8_t aExpected[nConstSize];
 };
 
 static std::mutex mtxSites;
@@ -125,9 +126,29 @@ struct PixelSite
 {
     uint8_t* pOperand;
     uint8_t nAuthored;
+    uint8_t nExpected;
 };
 
 static std::vector<PixelSite> aPixelSites;
+
+// A site stays ours only while it still holds the bytes we last put there. The scans are
+// unanchored and the transforms below rewrite nodes in place, so a recorded operand can end up
+// inside a node a later transform moved, and a package unload frees the buffer outright. Either
+// way the address stops meaning what it meant, and rewriting it on the next device reset puts a
+// float constant over whatever now lives there, a mangled operand the VM then executes.
+//
+// Callers hold mtxSites.
+static void AddSite(uint8_t* p, Live eKind, bool bFloat, float fAuthored)
+{
+    Site site{ p, eKind, bFloat, fAuthored, {} };
+    std::memcpy(site.aExpected, p, nConstSize);
+    aSites.push_back(site);
+}
+
+static void AddPixelSite(uint8_t* p)
+{
+    aPixelSites.push_back(PixelSite{ p, *p, *p });
+}
 
 static void ApplyLiveSites()
 {
@@ -142,8 +163,16 @@ static void ApplyLiveSites()
 
     std::lock_guard g(mtxSites);
 
-    for (const auto& site : aSites)
+    auto nDropped = 0;
+
+    std::erase_if(aSites, [&](Site& site)
     {
+        if (std::memcmp(site.pConstant, site.aExpected, nConstSize) != 0)
+        {
+            nDropped++;
+            return true;
+        }
+
         auto fValue = 0.0f;
 
         switch (site.eKind)
@@ -172,13 +201,28 @@ static void ApplyLiveSites()
 
         const auto c = site.bFloat ? FloatConst(fValue) : IntConst(static_cast<int32_t>(fValue + 0.5f));
         injector::WriteMemoryRaw(site.pConstant, const_cast<uint8_t*>(c.aBytes), nConstSize, true);
-    }
+        std::memcpy(site.aExpected, c.aBytes, nConstSize);
 
-    for (const auto& site : aPixelSites)
+        return false;
+    });
+
+    std::erase_if(aPixelSites, [&](PixelSite& site)
     {
-        const auto nScaled = std::clamp(static_cast<int>(site.nAuthored * fScale + 0.5f), 1, 255);
-        injector::WriteMemory<uint8_t>(site.pOperand, static_cast<uint8_t>(nScaled), true);
-    }
+        if (*site.pOperand != site.nExpected)
+        {
+            nDropped++;
+            return true;
+        }
+
+        const auto nScaled = static_cast<uint8_t>(std::clamp(static_cast<int>(site.nAuthored * fScale + 0.5f), 1, 255));
+        injector::WriteMemory<uint8_t>(site.pOperand, nScaled, true);
+        site.nExpected = nScaled;
+
+        return false;
+    });
+
+    if (nDropped)
+        LogWarn("MenuScale: dropped {} live site(s) whose bytecode moved", nDropped);
 }
 
 static int RecordPixels(uint8_t* pScript, int nSize, uint8_t nValue)
@@ -192,7 +236,7 @@ static int RecordPixels(uint8_t* pScript, int nSize, uint8_t nValue)
         if (std::memcmp(pScript + i, aCastByte, sizeof(aCastByte)) != 0 || pScript[i + 3] != nValue)
             continue;
 
-        aPixelSites.emplace_back(pScript + i + 3, nValue);
+        AddPixelSite(pScript + i + 3);
         i += 3;
         nCount++;
     }
@@ -207,10 +251,10 @@ static int RecordLive(uint8_t* pScript, int nSize, int32_t nValue, Live eKind)
     const auto fAuthored = static_cast<float>(nValue);
 
     auto nCount = ForEachConstant(pScript, nSize, IntConst(nValue),
-        [eKind, fAuthored](uint8_t* p) { aSites.emplace_back(p, eKind, false, fAuthored); });
+        [eKind, fAuthored](uint8_t* p) { AddSite(p, eKind, false, fAuthored); });
 
     nCount += ForEachConstant(pScript, nSize, FloatConst(fAuthored),
-        [eKind, fAuthored](uint8_t* p) { aSites.emplace_back(p, eKind, true, fAuthored); });
+        [eKind, fAuthored](uint8_t* p) { AddSite(p, eKind, true, fAuthored); });
 
     return nCount;
 }
@@ -230,7 +274,7 @@ static int RewriteOnce(uint8_t* pScript, int nSize, int32_t nValue, float fRepla
 }
 
 // XIIIEditCtrl sizes its text field as (WinWidth*640 - FirstBoxWidth)*fRatioX, but FirstBoxWidth
-// is already scaled - the line above reads (WinWidth*640*fRatioX - 16*fRatioX)/2 - so the ratio
+// is already scaled, the line above reads (WinWidth*640*fRatioX - 16*fRatioX)/2, so the ratio
 // lands twice. Past a ratio of 2 it goes negative and BeforePaint's shorten-until-it-fits loops
 // never terminate: "Runaway loop detected". Paint's second box is the same expression.
 //
@@ -292,7 +336,7 @@ static int ReassociateFieldWidth(uint8_t* pScript, int nSize)
 //   DrawStretchedTexture(C, X, 80*fRatioY, (W+40)*fRatioX, (H+10)*fScaleTo*fRatioY, myRoot.FondMenu);
 //
 // TextSize answers in screen pixels, so the ratio is already in W and H and the box grows with its
-// square - "Select your profile" comes out 504 tall at 3840x2160 where 144 is right. Both terms
+// square: "Select your profile" comes out 504 tall at 3840x2160 where 144 is right. Both terms
 // share a shape (measured local, 640x480 margin behind a cast to float, ratio), so one fix serves
 // both: scale the margin, replace the trailing ratio with a float 1. Same bytes, in place:
 //
@@ -352,7 +396,7 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
         {
             {
                 std::lock_guard g(mtxSites);
-                aPixelSites.emplace_back(p + 11, p[11]);
+                AddPixelSite(p + 11);
             }
 
             injector::WriteMemoryRaw(p + 19, const_cast<uint8_t*>(cOne.aBytes), nConstSize, true);
@@ -369,7 +413,7 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
         {
             {
                 std::lock_guard g(mtxSites);
-                aPixelSites.emplace_back(p + 10, p[10]);
+                AddPixelSite(p + 10);
             }
 
             injector::WriteMemoryRaw(p + 12, const_cast<uint8_t*>(cOne.aBytes), nConstSize, true);
@@ -381,8 +425,8 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// A message box is whole pixels drawn by the GUI natives, which read WinLeft straight - no
-// origin, no ratio - so the pillarbox never reaches it. Only its panel gets the offset added
+// A message box is whole pixels drawn by the GUI natives, which read WinLeft straight, no
+// origin, no ratio, so the pillarbox never reaches it. Only its panel gets the offset added
 // (hudscale's AddOrigin), hence panel centred, caption and buttons a pillarbox left.
 //
 // Cheaper to put the box in screen coordinates than to teach seven draw paths the offset, so
@@ -411,7 +455,7 @@ static void WriteLiveRead(uint8_t* pRead, Live eKind)
     injector::WriteMemoryRaw(pRead, aFixed, sizeof(aFixed), true);
 
     std::lock_guard g(mtxSites);
-    aSites.emplace_back(pRead + 1, eKind, true, 0.0f);
+    AddSite(pRead + 1, eKind, true, 0.0f);
 }
 
 static int CentreOnScreen(uint8_t* pScript, int nSize)
@@ -484,8 +528,7 @@ static int CentreInitBox(uint8_t* pScript, int nSize)
 
             {
                 std::lock_guard g(mtxSites);
-                aSites.emplace_back(pScript + i, n == 0 ? Live::MsgBoxTop : Live::MsgBoxLeft,
-                    true, 0.0f);
+                AddSite(pScript + i, n == 0 ? Live::MsgBoxTop : Live::MsgBoxLeft, true, 0.0f);
             }
 
             i += nConstSize - 1;
@@ -572,7 +615,7 @@ static int ScaleOnomatopoeia(uint8_t* pScript, int nSize)
             {
                 auto fAuthored = 0.0f;
                 std::memcpy(&fAuthored, p + nAt + 1, sizeof(fAuthored));
-                aSites.emplace_back(p + nAt, Live::Pixels, true, fAuthored);
+                AddSite(p + nAt, Live::Pixels, true, fAuthored);
             }
         }
 
@@ -590,7 +633,7 @@ static int ScaleOnomatopoeia(uint8_t* pScript, int nSize)
 //                                       ... myL.XPos -= Offset; }
 //
 // W is screen pixels, XPos/XSize are 640x480, so Offset carries the ratio into both: the box is
-// drawn (XSize-4)*fRatioX wide - the ratio squared - and slides a screen width left. Every page
+// drawn (XSize-4)*fRatioX wide, the ratio squared, and slides a screen width left. Every page
 // that labels anything goes through it, the input pages' titles and key rows above all.
 //
 // In 640x480 terms: W/fRatioX + 16. Same nodes reassociated, fits in place:
@@ -635,7 +678,7 @@ static int FixLabelWiden(uint8_t* pScript, int nSize)
 //
 //   C.SetPos((150 + (160-W)/2)*fRatioX, (47.5 - H/2)*fRatioY);
 //
-// The whole term is scaled, W and H with it, so the text leaves the box - at 3840x2160 the video
+// The whole term is scaled, W and H with it, so the text leaves the box: at 3840x2160 the video
 // page's title lands off the top left corner. Wanted 150*r + (160*r - W)/2, which folds to
 // (150 + 160/2)*r - W/2. Same node count; one multiply of the divisor pads the byte the fold
 // frees:
@@ -771,7 +814,7 @@ static int NeutraliseLinePitch(uint8_t* pScript, int nSize)
 
         {
             std::lock_guard g(mtxSites);
-            aPixelSites.emplace_back(p + 10, p[10]);
+            AddPixelSite(p + 10);
         }
 
         injector::WriteMemoryRaw(p + 12, const_cast<uint8_t*>(cOne.aBytes), nConstSize, true);
@@ -998,7 +1041,7 @@ export void RefreshInterfaceObjects()
     SetDefaultBool("XIIIWindow", "bCenterInGame");
 
     // The box lays out in screen pixels now, but the help bar it inherits lays out in the 4:3 box,
-    // so it would land a pillarbox left of the page's own bar - which says the same thing.
+    // so it would land a pillarbox left of the page's own bar, which says the same thing.
     for (const auto szBox : { "XIIIMsgBox", "XIIIMsgBoxInGame", "XIIILiveMsgBox" })
         SetDefaultBool(szBox, "bDisplayBar", nullptr, false);
 
@@ -1099,7 +1142,7 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIRootWindow."))
         nTotal += RewriteOnce(pScript, nSize, 448, 480.0f);
 
-    // Message box buttons are raw pixels - 88 wide, 30 tall, 5 up from the bottom - and the gap
+    // Message box buttons are raw pixels, 88 wide, 30 tall, 5 up from the bottom, and the gap
     // between them is whatever is left, so they come out slivers bunched in the middle.
     if ((std::strstr(szFullName, ".LayoutButtons") || std::strstr(szFullName, ".AdjustPosition"))
         && OwnedByAny(szFullName, { ".XIIIMsgBox.", ".XIIIMsgBoxInGame.", ".XIIILiveMsgBox." }))
