@@ -50,8 +50,7 @@ public:
 
         mPrefs[PREF_VSYNC] = std::clamp(iniReader.ReadInteger("Display", "VSync", 1), 0, 1);
 
-        // 0 unlocks. Anything else goes to the engine tick rate governor, which sleeps rather than
-        // spins, so a cap is cheaper than none.
+        // 0 unlocks. Anything else is paced by the fix itself; the engine's own wait is bypassed.
         mPrefs[PREF_MAXFRAMERATE] = std::clamp(iniReader.ReadInteger("Display", "MaxFrameRate", 0), 0, 9999);
 
         mPrefs[PREF_ANISOTROPICFILTERING] = std::clamp(iniReader.ReadInteger("Graphics", "AnisotropicFiltering", 16), 0, 16);

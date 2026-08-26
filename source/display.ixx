@@ -16,12 +16,14 @@ import internalres;
 //   +0x0D8  UseVSync            config bool the game has but only honours fullscreen
 //   +0x178  MaxAnisotropy       fetched from D3DCAPS8 at Init, never used by the game
 //   +0x64C  bFullscreen
+//   +0x660  RefreshRate         picked by SetRes, written into present parameters
 //   +0x658  SizeX
 //   +0x65C  SizeY
 //   +0x66C  IDirect3DDevice8*
 static constexpr auto nOffsetUseVSync = 0xD8;
 static constexpr auto nOffsetMaxAnisotropy = 0x178;
 static constexpr auto nOffsetFullscreen = 0x64C;
+static constexpr auto nOffsetRefreshRate = 0x660;
 static constexpr auto nOffsetSizeX = 0x658;
 static constexpr auto nOffsetSizeY = 0x65C;
 static constexpr auto nOffsetDevice = 0x66C;
@@ -63,6 +65,11 @@ static SafetyHookInline shPresent{};
 // the presentation interval may only be DEFAULT there. Fullscreen becomes FLIP instead of DISCARD,
 // so the patch goes on for windowed vsync only.
 static std::unique_ptr<raw_mem> patchWindowedSwapEffect;
+
+// Fullscreen mode picking scores every display mode by |refresh - 75| and takes the lowest, so a
+// 75 Hz mode wins on any monitor that has one and the frame rate is pinned there whatever the cap
+// says. Scoring by -refresh instead takes the highest the monitor offers.
+static std::unique_ptr<raw_mem> patchRefreshPreference;
 
 static void ResolveDesiredResolution(int& nX, int& nY)
 {
@@ -113,8 +120,9 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     nBackBufferWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
     nBackBufferHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
 
-    LogInfo("Display: {}x{} {}, vsync {}", nBackBufferWidth.load(), nBackBufferHeight.load(),
-        *reinterpret_cast<int*>(pThis + nOffsetFullscreen) ? "fullscreen" : "windowed", bVSync ? "on" : "off");
+    LogInfo("Display: {}x{} {} {} Hz, vsync {}", nBackBufferWidth.load(), nBackBufferHeight.load(),
+        *reinterpret_cast<int*>(pThis + nOffsetFullscreen) ? "fullscreen" : "windowed",
+        *reinterpret_cast<int*>(pThis + nOffsetRefreshRate), bVSync ? "on" : "off");
 
     onDeviceResetEvent().executeAll();
     return nResult;
@@ -161,6 +169,20 @@ static void InitD3DDrv()
         patchWindowedSwapEffect = std::make_unique<raw_mem>(patternSwapEffect.get_first(3), std::initializer_list<uint8_t>{ 0x02 });
     else
         LogWarn("Display: swap effect pattern not found, windowed vsync is off");
+
+    // SUB EAX,0x4B / JNS / NEG EAX - the abs distance to 75. NEG EAX alone leaves the score as
+    // -refresh, so the highest mode wins the tie break.
+    auto patternRefresh = module_pattern(L"D3DDrv.dll", "8B 44 13 08 03 DA 83 E8 4B 79 02 F7 D8");
+    if (!patternRefresh.empty())
+    {
+        patchRefreshPreference = std::make_unique<raw_mem>(patternRefresh.get_first(6),
+            std::initializer_list<uint8_t>{ 0xF7, 0xD8, 0x90, 0x90, 0x90, 0x90, 0x90 });
+        patchRefreshPreference->Write();
+    }
+    else
+    {
+        LogWarn("Display: refresh rate pattern not found, fullscreen stays on 75 Hz");
+    }
 
     shSetRes = safetyhook::create_inline(pSetRes, SetRes);
     shPresent = safetyhook::create_inline(pPresent, Present);
