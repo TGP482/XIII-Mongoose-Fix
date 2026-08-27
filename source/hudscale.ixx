@@ -63,6 +63,7 @@ static SafetyHookMid amhOriginBlind[std::size(aOriginBlindSlots)]{};
 static SafetyHookMid mhDrawTile{};
 static SafetyHookMid mhDrawTriangle{};
 static SafetyHookMid mhCharSize{};
+static SafetyHookMid mhDrawPortal{};
 
 // Set for the length of the HUD pass; atomic because the ini watcher reads the scale.
 static std::atomic<bool> bHudPass = false;
@@ -125,6 +126,24 @@ static void DrawTile(SafetyHookContext& ctx)
         pCorners[1] = fStringY + (pCorners[1] - fStringY) * fScale;
         pCorners[2] = fStringX + (pCorners[2] - fStringX) * fScale;
         pCorners[3] = fStringY + (pCorners[3] - fStringY) * fScale;
+    }
+}
+
+// The camera view is a portal: script places it in HUD units, the backing quad goes out through
+// DrawTile and scales with everything else, but the region the scene renders into is set from
+// these four stack ints and does not, so the picture stays 320x240 in a corner. Read after the
+// last parameter is off the script stack, before either use.
+static void DrawPortal(SafetyHookContext& ctx)
+{
+    if (!bHudPass.load())
+        return;
+
+    const auto fScale = fHudScale.load();
+
+    for (auto nOffset : { 0x1c, 0x20, 0x24, 0x28 })
+    {
+        auto pValue = reinterpret_cast<int32_t*>(ctx.ebp - nOffset);
+        *pValue = static_cast<int32_t>(*pValue * fScale);
     }
 }
 
@@ -635,14 +654,27 @@ struct CanvasBox
     int32_t nSizeY;
 };
 
-static CanvasBox ClampToMenuBox(uint8_t* pCanvas, float fScale)
+static CanvasBox SaveBox(uint8_t* pCanvas)
 {
-    CanvasBox saved{
+    return {
         *reinterpret_cast<float*>(pCanvas + nOffsetClipX),
         *reinterpret_cast<float*>(pCanvas + nOffsetClipY),
         *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeX),
         *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY),
     };
+}
+
+static void WriteBox(uint8_t* pCanvas, const CanvasBox& box)
+{
+    *reinterpret_cast<float*>(pCanvas + nOffsetClipX) = box.fClipX;
+    *reinterpret_cast<float*>(pCanvas + nOffsetClipY) = box.fClipY;
+    *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeX) = box.nSizeX;
+    *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY) = box.nSizeY;
+}
+
+static CanvasBox ClampToMenuBox(uint8_t* pCanvas, float fScale)
+{
+    const auto saved = SaveBox(pCanvas);
 
     const auto fBoxX = fAuthoredWidth * fScale;
     const auto fBoxY = fAuthoredHeight * fScale;
@@ -662,11 +694,28 @@ static CanvasBox ClampToMenuBox(uint8_t* pCanvas, float fScale)
 static void RestoreBox(uint8_t* pCanvas, const CanvasBox& saved)
 {
     bGuiClamped = false;
+    WriteBox(pCanvas, saved);
+}
 
-    *reinterpret_cast<float*>(pCanvas + nOffsetClipX) = saved.fClipX;
-    *reinterpret_cast<float*>(pCanvas + nOffsetClipY) = saved.fClipY;
-    *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeX) = saved.nSizeX;
-    *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY) = saved.nSizeY;
+// Rendering the portal sets the canvas up for the camera's own view and leaves it that way, and
+// the scene it renders runs a HUD pass of its own that ends by clearing the flag. Whatever the
+// HUD had left to draw then went out unscaled at screen coordinates.
+static SafetyHookInline shDrawPortalExec{};
+
+static void __fastcall DrawPortalExec(uint8_t* pCanvas, void*, void* pStack, void* pResult)
+{
+    if (!pCanvas || !bHudPass.load())
+    {
+        shDrawPortalExec.thiscall<void>(pCanvas, pStack, pResult);
+        return;
+    }
+
+    const auto saved = SaveBox(pCanvas);
+
+    shDrawPortalExec.thiscall<void>(pCanvas, pStack, pResult);
+
+    WriteBox(pCanvas, saved);
+    bHudPass = true;
 }
 
 // Loading thread draws to the viewport's canvas, laid out against 640x480 like the HUD: 50 pixel
@@ -785,7 +834,6 @@ static void __fastcall GuiPostRender(uint8_t* pMaster, void*, uint8_t* pCanvas)
 
 static void __fastcall HudPostRender(uint8_t* pHud, void*, uint8_t* pCanvas)
 {
-
     // The HUD lays out against the whole screen, so inside the interface pass the real values go
     // back for its length.
     const auto bRestoreBox = pCanvas && bGuiClamped.load();
@@ -831,12 +879,26 @@ static void __fastcall HudPostRender(uint8_t* pHud, void*, uint8_t* pCanvas)
     *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeX) = static_cast<int32_t>(nSizeX / fScale);
     *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY) = static_cast<int32_t>(fAuthoredHeight);
 
+    // The HUD sets no origin of its own, so it inherits whatever the interface left behind, and
+    // execDrawTile adds it before anything here sees the quad: the loading screen picture is a
+    // page wide tile drawn in this pass, and the menu's centring origin put it a page right.
+    auto pOrgX = reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
+    auto pOrgY = reinterpret_cast<float*>(pCanvas + nOffsetOrgY);
+    const auto fOrgX = *pOrgX;
+    const auto fOrgY = *pOrgY;
+
+    *pOrgX = 0.0f;
+    *pOrgY = 0.0f;
+
     fHudScale = fScale;
     bHudPass = true;
 
     shHudPostRender.thiscall<void>(pHud, pCanvas);
 
     bHudPass = false;
+
+    *pOrgX = fOrgX;
+    *pOrgY = fOrgY;
 
     *reinterpret_cast<float*>(pCanvas + nOffsetClipX) = fClipX;
     *reinterpret_cast<float*>(pCanvas + nOffsetClipY) = fClipY;
@@ -952,6 +1014,22 @@ static void InitEngine()
 
     if (!shRenderAnimation)
         LogWarn("HudScale: the loading animation was not found, the loading screen stays 640x480");
+
+    // MOV ECX,[EBP+8] / LEA EAX,[EBP-0x2c] / MOV [EBP-0x2c],0x5a - the default FOV going onto
+    // the script stack, 0x31 short of the point where all nine parameters are read.
+    auto patternDrawPortal = module_pattern(L"Engine.dll", "8B 4D 08 8D 45 D4 C7 45 D4 5A 00 00 00");
+
+    if (!patternDrawPortal.empty())
+        mhDrawPortal = safetyhook::create_mid(patternDrawPortal.get_first(0x31), DrawPortal);
+
+    if (!mhDrawPortal)
+        LogWarn("HudScale: UCanvas::execDrawPortal was not found, the camera view stays 320x240");
+
+    if (auto pDrawPortal = GetProcAddress(hEngine, "?execDrawPortal@UCanvas@@QAEXAAUFFrame@@QAX@Z"))
+        shDrawPortalExec = safetyhook::create_inline(pDrawPortal, DrawPortalExec);
+
+    if (!shDrawPortalExec)
+        LogWarn("HudScale: UCanvas::execDrawPortal could not be hooked, the HUD drops out of scale behind a camera view");
 
     if (auto pDrawLine = GetProcAddress(hEngine, "?DrawLine@FCanvasUtil@@QAEXMMMMVFColor@@W4ERenderStyle@@@Z"))
         shDrawLine = safetyhook::create_inline(pDrawLine, DrawLine);
