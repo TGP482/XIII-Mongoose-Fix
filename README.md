@@ -17,23 +17,32 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 ## Features
 
 ### Display
-- **Display Mode** - Chooses between fullscreen, borderless and windowed.
+- **Display Mode** - Allows you to change between Fullscreen, Borderless and Windowed modes.
 - **Resolution** - Sets the game's resolution, with 0 using your desktop resolution.
-- **V-Sync** - Restores V-Sync support in windowed mode, which the game only ever applied in fullscreen.
-- **Max Frame Rate** - Caps the game's frame rate either at your monitor's refresh rate automatically or at a value you pick.
+- **Internal Resolution** - Added the option to change the internal resolution to a custom value, to allow for supersampling and downscaling.
+- **Scaling Filter** - Sets the internal resolution scaling filter.
+- **V-Sync** - Restores V-Sync in windowed and borderless, which the game only ever applied in fullscreen.
+- **Max Frame Rate** - Caps the game's frame rate, either at your monitor's refresh rate automatically or at a value you pick.
 
 ### Graphics
-- **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures.
+- **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures instead of using the game's defaults.
+- **MSAA** - Enabled multisample antialiasing at 2, 4 or 8 samples.
 
-### Input
-- **Mouse Sensitivity** - Adjusts mouse sensitivity, which the game has no option for.
+### Gameplay
+- **Mouse Look Sensitivity** - Adjusts mouse look sensitivity, which the game has no option for.
 - **Mouse Smoothing** - Removes the engine's mouse smoothing, which swallows fast movement.
 
-### Interface
-- **Skip Intro Movies** - Skips the ubi, alien and nvidia logo movies the exe plays before the menu.
-
 ### Field of View
-- **Field of View** - Adjusts the field of view from the game's 85 default, range: 45 - 145. Weapon zoom and scopes keep their magnification.
+- **Field of View** - Adjusts the base gameplay field of view.
+
+### Controller
+- **Restored Controller Support** - Full controller support has been restored.
+- **Controller Look Sensitivity** - Adjusts controller look sensitivity.
+- **Vibration** - Restores controller vibration support.
+- **Layout** - Sets the starting pad layout out of the four the Xbox version shipped with.
+
+### General
+- **Skip Intro** - Skips the Ubisoft, alien and nvidia logo movies the exe plays before the menu.
 
 ### Mongoose Fixes
 - Fixed mouse movement breaking with high polling rates and removed the deadzone.

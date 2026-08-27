@@ -22,6 +22,9 @@ export enum Pref
     PREF_SCALINGFILTER,
     PREF_MOUSESENSITIVITY,
     PREF_MOUSESMOOTHING,
+    PREF_PADSENSITIVITY,
+    PREF_VIBRATION,
+    PREF_PADLAYOUT,
     PREF_FIELDOFVIEW,
     PREF_SKIPINTROMOVIES,
 
@@ -71,14 +74,20 @@ public:
         mPrefs[PREF_INTERNALRESY] = bInternal ? std::clamp(nInternalY, 240, 16384) : 0;
         mPrefs[PREF_SCALINGFILTER] = std::clamp(iniReader.ReadInteger("Display", "ScalingFilter", 1), 0, 1);
 
-        mPrefs[PREF_MOUSESMOOTHING] = std::clamp(iniReader.ReadInteger("Input", "MouseSmoothing", 0), 0, 1);
+        mPrefs[PREF_MOUSESMOOTHING] = std::clamp(iniReader.ReadInteger("Gameplay", "MouseSmoothing", 0), 0, 1);
 
-        auto fMouseSensitivity = iniReader.ReadFloat("Input", "MouseSensitivity", 1.0f);
+        auto fMouseSensitivity = iniReader.ReadFloat("Gameplay", "MouseLookSensitivity", 1.0f);
         mPrefs[PREF_MOUSESENSITIVITY] = fMouseSensitivity <= 0.0f ? 1.0f : std::clamp(fMouseSensitivity, 0.01f, 20.0f);
+
+        auto fPadSensitivity = iniReader.ReadFloat("Controller", "ControllerLookSensitivity", 1.0f);
+        mPrefs[PREF_PADSENSITIVITY] = fPadSensitivity <= 0.0f ? 1.0f : std::clamp(fPadSensitivity, 0.01f, 20.0f);
+
+        mPrefs[PREF_VIBRATION] = std::clamp(iniReader.ReadInteger("Controller", "Vibration", 1), 0, 1);
+        mPrefs[PREF_PADLAYOUT] = std::clamp(iniReader.ReadInteger("Controller", "Layout", 0), 0, 3);
 
         mPrefs[PREF_FIELDOFVIEW] = std::clamp(iniReader.ReadFloat("FieldOfView", "FieldOfView", fStockFieldOfView), 45.0f, 145.0f);
 
-        mPrefs[PREF_SKIPINTROMOVIES] = std::clamp(iniReader.ReadInteger("Interface", "SkipIntroMovies", 1), 0, 1);
+        mPrefs[PREF_SKIPINTROMOVIES] = std::clamp(iniReader.ReadInteger("General", "SkipIntro", 1), 0, 1);
 
         // Installed once, on the first read; what makes every setting live.
         static std::once_flag flag;

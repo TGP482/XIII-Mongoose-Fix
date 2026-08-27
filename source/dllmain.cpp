@@ -13,6 +13,7 @@ import fov;
 import maxfps;
 import fpsfixes;
 import rawmouse;
+import controller;
 import comicpanels;
 import crashdump;
 import blurfix;

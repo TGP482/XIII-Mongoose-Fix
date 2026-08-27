@@ -81,6 +81,13 @@ static std::unique_ptr<raw_mem> patchSkipSmoothing;
 static std::unique_ptr<raw_mem> patchNoFovScaling;
 static std::vector<std::unique_ptr<raw_mem>> patchNoMenuDeadzone;
 
+// The pad's aTurn and aLookUp take this same factor, so the controller module divides it back out.
+// 0 while the patch is off, meaning the stock FOV factor still stands.
+export float PlayerAxisScale()
+{
+    return patchNoFovScaling ? fPlayerMouseScale : 0.0f;
+}
+
 // Not the game's window: it owns that window procedure and recreates the window on a mode change,
 // either of which drops the deltas silently. A message only window of our own, own pump.
 static HWND hRawInputWindow = nullptr;
@@ -230,9 +237,15 @@ static void UpdatePlayerScale()
     fPlayerMouseScale = fMatched * MongooseFixSettings.GetFloat(PREF_MOUSESENSITIVITY);
 }
 
+// Pad feed rides this hook rather than a second one on the same function.
+export inline std::function<void(void*)> fnViewportInput;
+
 static void __fastcall UpdateInput(void* pThis, void*, int bIsMainViewport)
 {
     shUpdateInput.fastcall<void>(pThis, nullptr, bIsMainViewport);
+
+    if (fnViewportInput)
+        fnViewportInput(pThis);
 
     if (!pCauseInputEvent || !EnsureRawInput())
         return;
