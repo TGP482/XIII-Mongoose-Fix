@@ -8,34 +8,32 @@ import common;
 import display;
 import logging;
 
-// XIDInterf.u lays the menus out in 640x480, wrongly twice: BeforePaint derives fRatioX=ClipX/640
-// and fRatioY=ClipY/480 separately, stretching 4:3 art on 16:9, then clamps both to 800/640;
-// XIIIWindow.InternalOn* and the four control classes pillarbox the rest with
-// if (ClipX > 800) SetOrigin((ClipX-800)/2, ...), the mouse hit test included.
+// XIDInterf.u lay menus out in 640x480, wrong twice: BeforePaint make fRatioX=ClipX/640 and
+// fRatioY=ClipY/480 apart, stretch 4:3 art on 16:9, then clamp both to 800/640; XIIIWindow.
+// InternalOn* and the four control classes pillarbox rest with
+// if (ClipX > 800) SetOrigin((ClipX-800)/2, ...), mouse hit test included.
 //
-// All constant operands in the package bytecode, patched in place, nothing inserted, no jump
-// moved:
+// All be constant operands in package bytecode, patched in place, nothing inserted, no jump moved:
 //
-//   BeforePaint's 800/600   1e9, so FClamp returns what it was handed.
-//   800/600 elsewhere       640*scale, 480*scale, the centring those branches meant, and equal to
-//                           ClipX/ClipY on 4:3, so the tests go false.
+//   BeforePaint 800/600     1e9, so FClamp give back what it got.
+//   800/600 elsewhere       640*scale, 480*scale, the centring those branches meant, same as
+//                           ClipX/ClipY on 4:3, so tests go false.
 //   DisplayHelpBar          the one part in raw screen pixels (32 tall, 30 in from each edge, 6
-//                           from the bottom, 28 pixel icons, 3 pixel gap). One byte each, so past
-//                           a scale of about 8 they stop growing.
-//   XIIIRootWindow's 448    480. 448 is an NTSC safe area squash that shipped on PC, multiplying
-//                           nearly every menu Y by 0.9333.
-//   bCenterInGame           on. Set on only three input menus; on, the centring branch, the
-//                           control bounds and the mouse correction agree.
-//   bCalculateSize          on. A dozen menus turn it off and assign a caption width of
-//                           200/160/175, 640x480 pixels in a field measured in screen pixels, with
-//                           no room in the byte for a scaled value.
+//                           from bottom, 28 pixel icons, 3 pixel gap). One byte each, so past
+//                           scale of about 8 they stop growing.
+//   XIIIRootWindow 448      480. 448 be NTSC safe area squash that shipped on PC, multiply nearly
+//                           every menu Y by 0.9333.
+//   bCenterInGame           on. Set on only three input menus; on, centring branch, control bounds
+//                           and mouse correction agree.
+//   bCalculateSize          on. Dozen menus turn it off and give caption width 200/160/175,
+//                           640x480 pixels in field measured in screen pixels, no room in byte for
+//                           scaled value.
 //
-// The first two are flags, reached through the object system; the rest are recorded and rewritten
-// on every device reset. One scale for both axes comes free from hudscale.ixx making the canvas
-// report the menu box.
+// First two be flags, reached through object system; rest recorded and rewritten on every device
+// reset. One scale for both axes come free from hudscale.ixx making canvas report menu box.
 //
-// Patching happens in UFunction::PostLoad (vtable +0x28, body shared by no other Core.dll class),
-// after the linker deserialises the bytecode and before anything can call it.
+// Patching happen in UFunction::PostLoad (vtable +0x28, body shared by no other Core.dll class),
+// after linker deserialise bytecode and before anything can call it.
 //
 //   UStruct  +0x48  Script.Data, +0x4C Script.ArrayNum  (TArray<BYTE>)
 static constexpr auto nOffsetScriptData = 0x48;
@@ -44,14 +42,14 @@ static constexpr auto nOffsetScriptNum = 0x4C;
 static constexpr auto fAuthoredWidth = 640.0f;
 static constexpr auto fAuthoredHeight = 480.0f;
 
-// Where every PC message box opens, in 640x480 units. Not page centre: the pause panel uses the
-// same corner and both must agree.
+// Where every PC message box open, in 640x480 units. Not page centre: pause panel use same corner
+// and both must agree.
 static constexpr auto fMsgBoxOrgX = 220.0f;
 static constexpr auto fMsgBoxOrgY = 130.0f;
 
 // EX_IntConst 0x1D, EX_FloatConst 0x1E, each plus four little endian bytes. Which one a literal
-// became is not obvious from the source: 800 in float arithmetic folds to a float, the 800 in
-// "C.ClipX > 800" stays an int behind a cast, so both are looked for.
+// became not obvious from source: 800 in float arithmetic fold to float, the 800 in
+// "C.ClipX > 800" stay int behind cast, so both looked for.
 static constexpr uint8_t nIntConst = 0x1D;
 static constexpr uint8_t nFloatConst = 0x1E;
 static constexpr auto nConstSize = 5;
@@ -75,8 +73,8 @@ static Constant FloatConst(float fValue)
     return c;
 }
 
-// A plain byte scan. A five byte constant could in principle sit inside another instruction's
-// operand, but never does in these functions, and a disassembler to rule it out is a lot of code.
+// Plain byte scan. Five byte constant could in principle sit inside another instruction operand,
+// but never do in these functions, and disassembler to rule it out be lot of code.
 template<class F>
 static int ForEachConstant(uint8_t* pScript, int nSize, const Constant& from, F&& fn)
 {
@@ -95,7 +93,7 @@ static int ForEachConstant(uint8_t* pScript, int nSize, const Constant& from, F&
     return nCount;
 }
 
-// A number the resolution decides; the operand keeps whichever encoding it was compiled with.
+// Number resolution decide; operand keep whichever encoding it compiled with.
 enum class Live
 {
     MenuWidth,
@@ -119,7 +117,7 @@ struct Site
 static std::mutex mtxSites;
 static std::vector<Site> aSites;
 
-// EX_IntConstByte behind a cast to float. One byte, so the original is kept and the scale clamped.
+// EX_IntConstByte behind cast to float. One byte, so original kept and scale clamped.
 static constexpr uint8_t aCastByte[] = { 0x39, 0x3F, 0x2C };
 
 struct PixelSite
@@ -131,11 +129,11 @@ struct PixelSite
 
 static std::vector<PixelSite> aPixelSites;
 
-// A site stays ours only while it still holds the bytes we last put there. The scans are
-// unanchored and the transforms below rewrite nodes in place, so a recorded operand can end up
-// inside a node a later transform moved, and a package unload frees the buffer outright. Either
-// way the address stops meaning what it meant, and rewriting it on the next device reset puts a
-// float constant over whatever now lives there, a mangled operand the VM then executes.
+// Site stay ours only while it still hold bytes we last put there. Scans be unanchored and
+// transforms below rewrite nodes in place, so recorded operand can land inside node a later
+// transform moved, and package unload free buffer outright. Either way address stop meaning what it
+// meant, and rewriting it on next device reset put float constant over whatever live there now,
+// mangled operand VM then run.
 //
 // Callers hold mtxSites.
 static void AddSite(uint8_t* p, Live eKind, bool bFloat, float fAuthored)
@@ -158,7 +156,7 @@ static void ApplyLiveSites()
     if (nWidth <= 0 || nHeight <= 0)
         return;
 
-    // Parenthesised because Windows.h is included without NOMINMAX and min is a macro.
+    // Parenthesised because Windows.h included without NOMINMAX and min be macro.
     const auto fScale = (std::min)(nWidth / fAuthoredWidth, nHeight / fAuthoredHeight);
 
     std::lock_guard g(mtxSites);
@@ -177,20 +175,22 @@ static void ApplyLiveSites()
 
         switch (site.eKind)
         {
-        // The branches compare against the box the canvas reports, so the bound must make
-        // (box - bound)/2 come out as (screen - box)/2.
+        // Branches compare against box canvas report, so bound must make (box - bound)/2 come out
+        // as (screen - box)/2. Past 24:9 screen be wider than two boxes and bound go negative,
+        // which both comparison and halving take, so no floor: floored at zero menu sat half a box
+        // in from left.
         case Live::MenuWidth:
-            fValue = std::clamp(2.0f * fAuthoredWidth * fScale - nWidth, 0.0f, fAuthoredWidth * fScale);
+            fValue = 2.0f * fAuthoredWidth * fScale - nWidth;
             break;
         case Live::MenuHeight:
-            fValue = std::clamp(2.0f * fAuthoredHeight * fScale - nHeight, 0.0f, fAuthoredHeight * fScale);
+            fValue = 2.0f * fAuthoredHeight * fScale - nHeight;
             break;
         case Live::Pixels:     fValue = site.fAuthored * fScale; break;
 
         case Live::ScreenWidth:  fValue = static_cast<float>(nWidth); break;
         case Live::ScreenHeight: fValue = static_cast<float>(nHeight); break;
 
-        // Authored corner plus the pillarbox the GUI natives never apply.
+        // Authored corner plus pillarbox GUI natives never apply.
         case Live::MsgBoxLeft:
             fValue = fMsgBoxOrgX * fScale + (nWidth - fAuthoredWidth * fScale) * 0.5f;
             break;
@@ -273,20 +273,20 @@ static int RewriteOnce(uint8_t* pScript, int nSize, int32_t nValue, float fRepla
     return nCount;
 }
 
-// XIIIEditCtrl sizes its text field as (WinWidth*640 - FirstBoxWidth)*fRatioX, but FirstBoxWidth
-// is already scaled, the line above reads (WinWidth*640*fRatioX - 16*fRatioX)/2, so the ratio
-// lands twice. Past a ratio of 2 it goes negative and BeforePaint's shorten-until-it-fits loops
-// never terminate: "Runaway loop detected". Paint's second box is the same expression.
+// XIIIEditCtrl size its text field as (WinWidth*640 - FirstBoxWidth)*fRatioX, but FirstBoxWidth
+// already scaled, line above read (WinWidth*640*fRatioX - 16*fRatioX)/2, so ratio land twice. Past
+// ratio of 2 it go negative and BeforePaint shorten until it fit loops never end: "Runaway loop
+// detected". Paint second box be same expression.
 //
-// A prefix tree of float * (171, 0xAB) and float - (175, 0xAF), each <opcode> <a> <b>
-// EX_EndFunctionParms, so reassociating to WinWidth*640*fRatioX - FirstBoxWidth is two opcodes
-// swapped and the operands after them exchanged, in place:
+// Prefix tree of float * (171, 0xAB) and float - (175, 0xAF), each <opcode> <a> <b>
+// EX_EndFunctionParms, so reassociate to WinWidth*640*fRatioX - FirstBoxWidth be two opcodes
+// swapped and operands after them exchanged, in place:
 //
 //   AB AF AB <WinWidth> <640> 16 <FirstBoxWidth> 16 <fRatioX>       16
 //   AF AB AB <WinWidth> <640> 16 <fRatioX>       16 <FirstBoxWidth> 16
 //
-// The variables are EX_InstanceVariable plus a pointer, five bytes each. 640 is an int constant
-// behind an EX_PrimitiveCast to float, seven bytes, not a float constant.
+// Variables be EX_InstanceVariable plus pointer, five bytes each. 640 be int constant behind
+// EX_PrimitiveCast to float, seven bytes, no float constant.
 static constexpr uint8_t nMultiplyFloat = 0xAB;
 static constexpr uint8_t nSubtractFloat = 0xAF;
 static constexpr uint8_t nInstanceVariable = 0x01;
@@ -330,30 +330,29 @@ static int ReassociateFieldWidth(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// Pages sizing their own box from text they just measured:
+// Pages size own box from text they just measured:
 //
 //   C.TextSize(Caps(TitleText), W, H);
 //   DrawStretchedTexture(C, X, 80*fRatioY, (W+40)*fRatioX, (H+10)*fScaleTo*fRatioY, myRoot.FondMenu);
 //
-// TextSize answers in screen pixels, so the ratio is already in W and H and the box grows with its
-// square: "Select your profile" comes out 504 tall at 3840x2160 where 144 is right. Both terms
-// share a shape (measured local, 640x480 margin behind a cast to float, ratio), so one fix serves
-// both: scale the margin, replace the trailing ratio with a float 1. Same bytes, in place:
+// TextSize answer in screen pixels, so ratio already in W and H and box grow with its square:
+// "Select your profile" come out 504 tall at 3840x2160 where 144 be right. Both terms share one
+// shape (measured local, 640x480 margin behind cast to float, ratio), so one fix serve both: scale
+// margin, put float 1 in place of trailing ratio. Same bytes, in place:
 //
-//   AB AB AE <H> <39 3F 2C 0A> 16 <fScaleTo> 16 <fRatioY> 16     the height, 25 bytes
-//   AB    AE <W> <39 3F 2C 28> 16 <fRatioX>  16                  the width, 18 bytes
+//   AB AB AE <H> <39 3F 2C 0A> 16 <fScaleTo> 16 <fRatioY> 16     height, 25 bytes
+//   AB    AE <W> <39 3F 2C 28> 16 <fRatioX>  16                  width, 18 bytes
 //
-// The margin is one byte, so past a scale of about three the wider one (80, on the multiplayer
-// profile page) clamps at 255 and that box comes out slightly narrow.
+// Margin be one byte, so past scale of about three the wider one (80, on multiplayer profile page)
+// clamp at 255 and that box come out slightly narrow.
 static constexpr uint8_t nAddFloat = 0xAE;
 static constexpr uint8_t nLocalVariable = 0x00;
 static constexpr auto nMeasuredHeightLength = 25;
 static constexpr auto nMeasuredWidthLength = 18;
 static constexpr uint8_t nDivideFloat = 0xAC;
 
-// Locals holding screen pixels. TextSize and StrLen answer through two out parameters, so a
-// parameter list ending <local> <local> 16 names both. Mixed with 640x480 numbers they scale
-// twice.
+// Locals holding screen pixels. TextSize and StrLen answer through two out parameters, so parameter
+// list ending <local> <local> 16 name both. Mixed with 640x480 numbers they scale twice.
 static std::vector<uint32_t> aMeasured;
 
 static void CollectMeasured(uint8_t* pScript, int nSize)
@@ -425,24 +424,24 @@ static int NeutraliseMeasuredRatio(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// A message box is whole pixels drawn by the GUI natives, which read WinLeft straight, no
-// origin, no ratio, so the pillarbox never reaches it. Only its panel gets the offset added
-// (hudscale's AddOrigin), hence panel centred, caption and buttons a pillarbox left.
+// Message box be whole pixels drawn by GUI natives, which read WinLeft straight, no origin, no
+// ratio, so pillarbox never reach it. Only its panel get offset added (hudscale AddOrigin), so
+// panel centred, caption and buttons a pillarbox left.
 //
-// Cheaper to put the box in screen coordinates than to teach seven draw paths the offset, so
-// AdjustPosition centres against the screen, not the 4:3 box it is handed:
+// Cheaper to put box in screen coordinates than teach seven draw paths the offset, so
+// AdjustPosition centre against screen, not 4:3 box it get handed:
 //
 //   0F <WinLeft> AC AF 19 <C> <skip> <size> <ClipX> <WinWidth> 16 <39 3F 2C 02> 16     33 bytes
 //
-// A ClipX read is fourteen bytes, so is a float constant plus a zero. X first, Y second.
+// ClipX read be fourteen bytes, so be float constant plus zero. X first, Y second.
 static constexpr uint8_t nLet = 0x0F;
 static constexpr uint8_t nContext = 0x19;
 static constexpr uint8_t nIntConstCast[] = { 0x39, 0x3F, 0x1D };
 static constexpr auto nCentreLength = 33;
 static constexpr auto nCentreReadAt = 8;
 
-// Canvas field read and float-constant-plus-zero are both fourteen bytes. Constant rewritten with
-// the resolution.
+// Canvas field read and float constant plus zero both be fourteen bytes. Constant rewritten with
+// resolution.
 static void WriteLiveRead(uint8_t* pRead, Live eKind)
 {
     uint8_t aFixed[14];
@@ -484,28 +483,28 @@ static int CentreOnScreen(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// The in game box has no AdjustPosition: it keeps InitBox's argument, in 4:3 box coordinates.
-// InitBox opens by copying each parameter out, one statement each:
+// In game box have no AdjustPosition: it keep InitBox argument, in 4:3 box coordinates. InitBox
+// open by copying each parameter out, one statement each:
 //
 //   0F <WinWidth> <_Width>  ... <WinTop> <_OrgY>  <WinLeft> <_OrgX>          11 bytes each
 //
-// Third and fourth name the origins. Every read of them becomes the screen corner; a local read
-// and a float constant are both five bytes.
+// Third and fourth name origins. Every read of them become screen corner; local read and float
+// constant both be five bytes.
 static constexpr auto nCopyLength = 11;
 static constexpr auto nOrgYStatement = 2;
 static constexpr auto nOrgXStatement = 3;
 
-// A message box's size never left 640x480. Half the pages hand InitBox raw numbers, half multiply
-// by fRatioX, and the box is screen pixels now, so the raw ones stay a sixth of their size at 4K:
-// "This profile already exists" comes out one word to a line. A call site cannot tell the two
-// units apart. The parameters are copied out one statement each, so every read of the four size
-// ones becomes a constant the resolution drives. One size for every box, within a fifth of what
-// the pages already use, and InternalOnPreDraw still grows the height to fit the message.
+// Message box size never left 640x480. Half the pages hand InitBox raw numbers, half multiply by
+// fRatioX, and box be screen pixels now, so raw ones stay a sixth of their size at 4K: "This
+// profile already exists" come out one word to a line. Call site cannot tell the two units apart.
+// Parameters copied out one statement each, so every read of the four size ones become constant
+// resolution drive. One size for every box, within a fifth of what pages already use, and
+// InternalOnPreDraw still grow height to fit message.
 static constexpr auto fMsgBoxWidth = 400.0f;
 static constexpr auto fMsgBoxHeight = 230.0f;
 static constexpr auto fMsgBoxMargin = 10.0f;
 
-// InitBox's opening copies, in order: _Width, _Height, _OrgY, _OrgX, _LineWidth, _LineHeight.
+// InitBox opening copies, in order: _Width, _Height, _OrgY, _OrgX, _LineWidth, _LineHeight.
 static constexpr int aSizeStatement[] = { 0, 1, 4, 5 };
 static constexpr float aSizeAuthored[] = { fMsgBoxWidth, fMsgBoxHeight, fMsgBoxMargin, fMsgBoxMargin };
 static constexpr auto nSizeStatements = 6;
@@ -600,17 +599,15 @@ static int CentreInitBox(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// The comic pages pop an onomatopoeia over whatever is highlighted, growing it from nothing:
+// Comic pages pop onomatopoeia over whatever be highlighted, growing it from nothing:
 //
 //   DrawStretchedTexture(C, (205*fRatioX + 223) - 223*zoom, (23*fRatioY + 73) - 73*zoom,
 //                        223*zoom, 73*zoom, tOnomatopee[0]);
 //
-// Size is raw pixels, so WOO! WOO! and SLAM! stay as drawn. The two margins pinning the corner
-// are raw too while the corner is scaled, so the texture creeps as it grows. Wanted:
-// ratio(205 + 223*(1 - zoom)).
+// Size be raw pixels, so WOO! WOO! and SLAM! stay as drawn. The two margins pinning corner be raw
+// too while corner be scaled, so texture creep as it grow. Want: ratio(205 + 223*(1 - zoom)).
 //
-// A reassociation, so the position fits in place. The sizes are float constants, rewritten with
-// the resolution:
+// Reassociation, so position fit in place. Sizes be float constants, rewritten with resolution:
 //
 //   AF AE AB <205> <r> 16 <39 3F 2C DF> 16 AB <39 3F 2C DF> <zoom> 16 16          31 bytes
 //   AB AF AE <205>       <39 3F 2C DF> 16 AB <39 3F 2C DF> <zoom> 16 16 <r> 16
@@ -633,15 +630,15 @@ static void RewritePopPosition(uint8_t* p)
     aFixed[0] = nMultiplyFloat;
     aFixed[1] = nSubtractFloat;
     aFixed[2] = nAddFloat;
-    std::memcpy(aFixed + 3, p + 3, nConstSize);      // the corner
-    std::memcpy(aFixed + 8, p + 14, 4);              // the margin
+    std::memcpy(aFixed + 3, p + 3, nConstSize);      // corner
+    std::memcpy(aFixed + 8, p + 14, 4);              // margin
     aFixed[12] = nEndFunctionParms;
     aFixed[13] = nMultiplyFloat;
-    std::memcpy(aFixed + 14, p + 20, 4);             // the margin again
+    std::memcpy(aFixed + 14, p + 20, 4);             // margin again
     std::memcpy(aFixed + 18, p + 24, nConstSize);    // zoom
     aFixed[23] = nEndFunctionParms;
     aFixed[24] = nEndFunctionParms;
-    std::memcpy(aFixed + 25, p + 8, nConstSize);     // the ratio
+    std::memcpy(aFixed + 25, p + 8, nConstSize);     // ratio
     aFixed[30] = nEndFunctionParms;
 
     injector::WriteMemoryRaw(p, aFixed, nPopPositionLength, true);
@@ -658,7 +655,7 @@ static int ScaleOnomatopoeia(uint8_t* pScript, int nSize)
         if (!PopPosition(p) || !PopPosition(p + nPopPositionLength))
             continue;
 
-        // The two sizes, each a float constant times zoom.
+        // The two sizes, each float constant times zoom.
         if (p[62] != nMultiplyFloat || p[63] != nFloatConst || p[68] != nLocalVariable
             || p[73] != nEndFunctionParms
             || p[74] != nMultiplyFloat || p[75] != nFloatConst || p[80] != nLocalVariable
@@ -686,17 +683,17 @@ static int ScaleOnomatopoeia(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// XIIIWindow.DrawLabel grows its box to fit the caption:
+// XIIIWindow.DrawLabel grow its box to fit caption:
 //
 //   C.StrLen(myL.sLabel, W, H);
 //   if ((W + 16*fRatioX) > myL.XSize) { Offset = W + 16*fRatioX - myL.XSize; myL.XSize += Offset;
 //                                       ... myL.XPos -= Offset; }
 //
-// W is screen pixels, XPos/XSize are 640x480, so Offset carries the ratio into both: the box is
-// drawn (XSize-4)*fRatioX wide, the ratio squared, and slides a screen width left. Every page
-// that labels anything goes through it, the input pages' titles and key rows above all.
+// W be screen pixels, XPos/XSize be 640x480, so Offset carry ratio into both: box drawn
+// (XSize-4)*fRatioX wide, ratio squared, and slide a screen width left. Every page that label
+// anything go through it, input pages titles and key rows above all.
 //
-// In 640x480 terms: W/fRatioX + 16. Same nodes reassociated, fits in place:
+// In 640x480 terms: W/fRatioX + 16. Same nodes reassociated, fit in place:
 //
 //   AE <W> AB <39 3F 2C 10> 16 <fRatioX>       16 16       18 bytes
 //   AE AC  <W>              <fRatioX>       16 <39 3F 2C 10> 16
@@ -734,14 +731,13 @@ static int FixLabelWiden(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// A dozen page titles centre their caption in a 640x480 box the same wrong way:
+// Dozen page titles centre their caption in 640x480 box same wrong way:
 //
 //   C.SetPos((150 + (160-W)/2)*fRatioX, (47.5 - H/2)*fRatioY);
 //
-// The whole term is scaled, W and H with it, so the text leaves the box: at 3840x2160 the video
-// page's title lands off the top left corner. Wanted 150*r + (160*r - W)/2, which folds to
-// (150 + 160/2)*r - W/2. Same node count; one multiply of the divisor pads the byte the fold
-// frees:
+// Whole term scaled, W and H with it, so text leave box: at 3840x2160 video page title land off
+// top left corner. Want 150*r + (160*r - W)/2, which fold to (150 + 160/2)*r - W/2. Same node
+// count; one multiply of divisor pad the byte fold free:
 //
 //   AB AE <150> AC AF <39 3F 2C A0> <W> 16 <39 3F 2C 02> 16 16 <r> 16          31 bytes
 //   AF AB <230> <r> 16 AB AC <W> <39 3F 2C 02> 16 <39 3F 2C 01> 16 16
@@ -793,11 +789,11 @@ static int FoldMeasuredCentre(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// The Y half of the same line, and the pages that only have that half:
+// Y half of same line, and pages that only have that half:
 //
 //   (47.5 - H/2)*fRatioY   ->   47.5*fRatioY - H/2
 //
-// A plain reassociation, so the byte count holds without padding:
+// Plain reassociation, so byte count hold without padding:
 //
 //   AB AF <47.5> AC <H> <39 3F 2C 02> 16 16 <r> 16      25 bytes
 //   AF AB <47.5> <r> 16 AC <H> <39 3F 2C 02> 16 16
@@ -839,16 +835,16 @@ static int SwapMeasuredCentre(uint8_t* pScript, int nSize)
     return nCount;
 }
 
-// Same fault again in SetObjectives, which keeps a running LineY in whole pixels and steps it by
-// the height it just measured:
+// Same fault again in SetObjectives, which keep running LineY in whole pixels and step it by
+// height it just measured:
 //
 //   C.TextSize( MsgArray[i], W, H);
 //   C.SetPos( 50*fRatioX, (LineY+6)*fRatioY + iObjDecalY);
 //   LineY += 0.9*H;
 //
-// H is screen pixels, so LineY is too, and the ratio on it puts line two at 595 at 3840x2160 where
-// 256 is right. LineY being an int makes the sum an int add behind a cast to float rather than the
-// title boxes' float add; the repair is the same:
+// H be screen pixels, so LineY be too, and ratio on it put line two at 595 at 3840x2160 where 256
+// be right. LineY being int make the sum int add behind cast to float, not title boxes float add;
+// repair be same:
 //
 //   AB 39 3F 92 <LineY> <2C 06> 16 <fRatioY> 16     18 bytes
 static constexpr uint8_t nAddInt = 0x92;
@@ -902,7 +898,7 @@ static bool OwnedByAny(const char* szFullName, std::initializer_list<const char*
 using StaticFindObject_t = void* (__cdecl*)(void* pClass, void* pOuter, const char* szName, int bExactClass);
 using IsChildOf_t = int (__thiscall*)(const void* pStruct, const void* pParent);
 
-// reinterpret_cast is not a constant expression, so this is const rather than constexpr.
+// reinterpret_cast be no constant expression, so const, not constexpr.
 static void* const pAnyPackage = reinterpret_cast<void*>(static_cast<intptr_t>(-1));
 static constexpr auto nOffsetObjectClass = 0x24;    // UObject
 static constexpr auto nOffsetPropertyOffset = 0x34; // UProperty
@@ -915,7 +911,7 @@ static void* pUClassClass = nullptr;
 static void*** pppObjects = nullptr;
 static int32_t* pnObjects = nullptr;
 
-// UField::SuperField, for reaching a property without knowing which ancestor declared it.
+// UField::SuperField, for reaching property without knowing which ancestor declared it.
 static constexpr auto nOffsetSuperField = 0x28;
 
 static void* FindProperty(void* pClass, const char* szName);
@@ -936,16 +932,16 @@ static void* FindProperty(void* pClass, const char* szName)
     return nullptr;
 }
 
-// Turns a script bool on in the class defaults and everything already built from them: a subclass
-// copies its parent's defaults as it loads, so one that loaded first holds the old value, as does
-// every existing window. The optional float is a cached ratio; zeroing it forces a resize.
+// Turn script bool on in class defaults and everything already built from them: subclass copy
+// parent defaults as it load, so one that loaded first hold old value, same for every existing
+// window. Optional float be cached ratio; zero it, resize happen.
 static void SetDefaultBool(const char* szClass, const char* szProperty, const char* szStale = nullptr,
     bool bOn = true)
 {
     auto pClass = FindObject(pAnyPackage, szClass);
     auto pProperty = pClass ? FindProperty(pClass, szProperty) : nullptr;
 
-    // A class the level did not load is not a fault, and this runs twice a second.
+    // Class level did not load be no fault, and this run twice a second.
     if (!pProperty)
         return;
 
@@ -960,7 +956,7 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
     {
         auto pObject = static_cast<uint8_t*>((*pppObjects)[i]);
 
-        // The object array is sparse.
+        // Object array be sparse.
         if (!pObject)
             continue;
 
@@ -971,7 +967,7 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
             if (!pIsChildOf(pObject, pClass))
                 continue;
 
-            // Not GetDefaultObject, which asserts on a class whose defaults are not sized yet.
+            // Not GetDefaultObject, which assert on class whose defaults not sized yet.
             auto pDefaults = *reinterpret_cast<uint8_t**>(pObject + nOffsetClassDefaults);
             const auto nSize = *reinterpret_cast<int32_t*>(pObject + nOffsetClassDefaults + 4);
 
@@ -986,7 +982,7 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
             continue;
         }
 
-        // An existing window keeps what it was constructed with, so it is set too.
+        // Existing window keep what it built with, so it get set too.
         if (!pObjectClass || !pIsChildOf(pObjectClass, pClass))
             continue;
 
@@ -1000,10 +996,9 @@ static void SetDefaultBool(const char* szClass, const char* szProperty, const ch
     }
 }
 
-// GUIStyles' BorderOffsets are absolute pixels, the same 16 at every resolution, and are what
-// script reads when positioning text inside a control. The native draw ignores them and sizes from
-// the material (handled canvas-side). Authored values are kept so a resolution change does not
-// compound.
+// GUIStyles BorderOffsets be absolute pixels, same 16 at every resolution, and be what script read
+// when placing text inside control. Native draw ignore them and size from material (handled canvas
+// side). Authored values kept so resolution change not compound.
 static constexpr auto nOffsetArrayDim = 0x30;   // UProperty
 static constexpr auto nBorderCount = 4;
 
@@ -1025,7 +1020,7 @@ static void ScaleStyleBorders()
 
     const auto fScale = (std::min)(nWidth / fAuthoredWidth, nHeight / fAuthoredHeight);
 
-    // Both spellings are tried so the class name is not what this hinges on.
+    // Both spellings tried so class name not what this hang on.
     void* pClass = nullptr;
     void* pBorders = nullptr;
 
@@ -1084,7 +1079,7 @@ static void ScaleStyleBorders()
     }
 }
 
-// Menus are built as they are opened, so new windows have to be caught.
+// Menus built as they open, so new windows must be caught.
 export void RefreshInterfaceObjects()
 {
     if (!pStaticFindObject || !pIsChildOf || !pUClassClass || !pppObjects || !pnObjects)
@@ -1100,12 +1095,12 @@ export void RefreshInterfaceObjects()
 
     SetDefaultBool("XIIIWindow", "bCenterInGame");
 
-    // The box lays out in screen pixels now, but the help bar it inherits lays out in the 4:3 box,
-    // so it would land a pillarbox left of the page's own bar, which says the same thing.
+    // Box lay out in screen pixels now, but help bar it inherit lay out in 4:3 box, so it land a
+    // pillarbox left of page own bar, which say same thing.
     for (const auto szBox : { "XIIIMsgBox", "XIIIMsgBoxInGame", "XIIILiveMsgBox" })
         SetDefaultBool(szBox, "bDisplayBar", nullptr, false);
 
-    // XIIIComboControl caches the ratio it last sized itself at, so that is cleared too.
+    // XIIIComboControl cache ratio it last sized itself at, so that cleared too.
     SetDefaultBool("XIIIComboControl", "bCalculateSize", "OldRatioX");
     SetDefaultBool("XIIIValueControl", "bCalculateSize");
     SetDefaultBool("XIIIEditCtrl", "bCalculateSize");
@@ -1114,7 +1109,7 @@ export void RefreshInterfaceObjects()
     ScaleStyleBorders();
 }
 
-// Once, after the interface package is loaded and the device exists.
+// Once, after interface package loaded and device exist.
 static void ApplyObjectFixes()
 {
     if (!pStaticFindObject || !pIsChildOf || !pUClassClass || !pppObjects || !pnObjects)
@@ -1157,27 +1152,27 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (!pScript || nSize < nConstSize)
         return;
 
-    // Own buffer: the engine's is one of four that rotate.
+    // Own buffer: engine one be one of four that rotate.
     char szFullName[1024]{};
     pGetFullName(pFunction, szFullName);
 
-    // A live operand needs its value before the function it sits in can run.
+    // Live operand need its value before function it sit in can run.
     auto nTotal = 0;
 
-    // The one function that both derives the ratios and clamps them.
+    // The one function that both make ratios and clamp them.
     if (std::strstr(szFullName, ".XIIIWindow.BeforePaint"))
     {
         nTotal += RewriteOnce(pScript, nSize, 800, 1e9f)
             + RewriteOnce(pScript, nSize, 600, 1e9f);
     }
-    // The one place 800x600 is not a centring bound: out of game the bar is laid out in an 800x600
-    // box at the top left instead of spanning the page. False at 640x480, so it is nailed false.
+    // The one place 800x600 be no centring bound: out of game bar lay out in 800x600 box at top
+    // left instead of spanning page. False at 640x480, so nailed false.
     else if (std::strstr(szFullName, ".XIIIWindow.DisplayHelpBar"))
     {
         nTotal += RewriteOnce(pScript, nSize, 800, 1e9f)
             + RewriteOnce(pScript, nSize, 600, 1e9f);
     }
-    // Everywhere the 800x600 box is used to centre what was drawn inside it.
+    // Everywhere 800x600 box used to centre what drawn inside it.
     else if (OwnedByAny(szFullName, { ".XIIIWindow.", ".XIIIGUIBaseButton.", ".XIIIGuiButton.", ".XIIIComboControl.", ".XIIIValueControl." }))
     {
         nTotal += RecordLive(pScript, nSize, 800, Live::MenuWidth)
@@ -1189,7 +1184,7 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     {
         auto nCount = 0;
 
-        // Small numbers are EX_IntConstByte unless folded to a float, so both are looked for.
+        // Small numbers be EX_IntConstByte unless folded to float, so both looked for.
         for (const uint8_t nPixels : { 2, 3, 6, 10, 28, 30, 32 })
         {
             nCount += RecordPixels(pScript, nSize, nPixels);
@@ -1202,8 +1197,8 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIRootWindow."))
         nTotal += RewriteOnce(pScript, nSize, 448, 480.0f);
 
-    // Message box buttons are raw pixels, 88 wide, 30 tall, 5 up from the bottom, and the gap
-    // between them is whatever is left, so they come out slivers bunched in the middle.
+    // Message box buttons be raw pixels, 88 wide, 30 tall, 5 up from bottom, and gap between them
+    // be whatever left, so they come out slivers bunched in middle.
     if ((std::strstr(szFullName, ".LayoutButtons") || std::strstr(szFullName, ".AdjustPosition"))
         && OwnedByAny(szFullName, { ".XIIIMsgBox.", ".XIIIMsgBoxInGame.", ".XIIILiveMsgBox." }))
     {
@@ -1227,7 +1222,7 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIMsgBoxInGame.InitBox"))
         nTotal += CentreInitBox(pScript, nSize);
 
-    // The offsets InitBox insets its own controls by are raw pixels too.
+    // Offsets InitBox inset own controls by be raw pixels too.
     if (std::strstr(szFullName, ".XIIIMsgBox.InitBox"))
     {
         nTotal += NormaliseMsgBox(pScript, nSize);
@@ -1236,9 +1231,8 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
             nTotal += RecordPixels(pScript, nSize, nPixels);
     }
 
-    // Caret under the name being typed, and the dots at each end when the text is trimmed: raw
-    // pixels, a couple of texels wide at any resolution. Every float constant here is one of
-    // their sizes.
+    // Caret under name being typed, and dots at each end when text trimmed: raw pixels, couple of
+    // texels wide at any resolution. Every float constant here be one of their sizes.
     if (std::strstr(szFullName, ".XIIIEditCtrl.Paint"))
     {
         nTotal += RecordLive(pScript, nSize, 8, Live::Pixels)
@@ -1248,11 +1242,11 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIEditCtrl."))
         nTotal += ReassociateFieldWidth(pScript, nSize);
 
-    // The pause panel's native takes its surround bar width as an argument and script hands it a
-    // raw 10, the one number on the page still in 640x480 pixels.
+    // Pause panel native take its surround bar width as argument and script hand it raw 10, the one
+    // number on page still in 640x480 pixels.
     if (std::strstr(szFullName, ".XIIIMenuInGame.Paint"))
     {
-        // The native takes floats, so this one may be a whole EX_FloatConst.
+        // Native take floats, so this one may be whole EX_FloatConst.
         nTotal += RecordPixels(pScript, nSize, 10)
             + RecordLive(pScript, nSize, 10, Live::Pixels);
     }
@@ -1260,8 +1254,8 @@ static void __fastcall FunctionPostLoad(uint8_t* pFunction, void*)
     if (std::strstr(szFullName, ".XIIIMenuInGame.SetObjectives"))
         nTotal += NeutraliseLinePitch(pScript, nSize);
 
-    // Every menu page that measures its own text. Shapes are specific and each is gated on the
-    // local really holding a measurement, so the whole package can be swept.
+    // Every menu page that measure own text. Shapes be specific and each gated on local really
+    // holding a measurement, so whole package can be swept.
     if (std::strstr(szFullName, "XIDInterf."))
     {
         CollectMeasured(pScript, nSize);
@@ -1311,7 +1305,7 @@ public:
     {
         MongooseFix::onCoreInitEvent() += []() { InitCore(); };
 
-        // The package loads before the device, so these are written once there is one.
+        // Package load before device, so these written once there be one.
         MongooseFix::onD3DDrvInitEvent() += []()
         {
             onDeviceResetEvent() += []()
