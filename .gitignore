@@ -337,4 +337,3 @@ ASALocalRun/
 .mfractor/
 
 data/system/plugins/*.asi
-data/system/plugins/*.pdb

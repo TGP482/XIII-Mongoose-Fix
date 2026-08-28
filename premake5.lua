@@ -12,6 +12,8 @@ workspace "XIIIMongooseFix"
    kind "SharedLib"
    language "C++"
    targetdir "data/system/plugins"
+   implibdir "build/%{cfg.buildcfg}"
+   symbolspath "build/%{cfg.buildcfg}/%{prj.name}.pdb"
    targetextension ".asi"
    buildoptions { "/dxifcInlineFunctions-" }
 
@@ -69,7 +71,7 @@ workspace "XIIIMongooseFix"
 
    includedirs { "source" }
    includedirs { "source/includes" }
-   files { "source/**.h", "source/**.hpp", "source/**.cpp", "source/**.hxx", "source/**.ixx" }
+   files { "source/*.h", "source/*.hpp", "source/*.cpp", "source/*.hxx", "source/*.ixx" }
    files { "source/resources/Versioninfo.rc" }
 
    includedirs { "external/hooking" }
