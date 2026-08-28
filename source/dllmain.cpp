@@ -22,6 +22,7 @@ import hudscale;
 import fmv;
 import introskip;
 import exitfix;
+import cheats;
 import updatecheck;
 
 void Init()

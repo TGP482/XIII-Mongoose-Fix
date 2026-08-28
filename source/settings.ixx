@@ -27,6 +27,7 @@ export enum Pref
     PREF_PADLAYOUT,
     PREF_FIELDOFVIEW,
     PREF_SKIPINTROMOVIES,
+    PREF_ALLOWCHEATS,
 
     COUNT,
 };
@@ -88,6 +89,8 @@ public:
         mPrefs[PREF_FIELDOFVIEW] = std::clamp(iniReader.ReadFloat("FieldOfView", "FieldOfView", fStockFieldOfView), 45.0f, 145.0f);
 
         mPrefs[PREF_SKIPINTROMOVIES] = std::clamp(iniReader.ReadInteger("General", "SkipIntro", 1), 0, 1);
+
+        mPrefs[PREF_ALLOWCHEATS] = std::clamp(iniReader.ReadInteger("General", "AllowCheats", 0), 0, 1);
 
         // Installed once, on the first read; what makes every setting live.
         static std::once_flag flag;

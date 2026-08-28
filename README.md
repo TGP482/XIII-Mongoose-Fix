@@ -43,6 +43,7 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 
 ### General
 - **Skip Intro** - Skips the Ubisoft, alien and nvidia logo movies the exe plays before the menu.
+- **Allow Cheats** - Allows cheats to be used through the console.
 
 ### Fixes
 - Fixed mouse movement breaking with high polling rates and removed the deadzone.
