@@ -16,25 +16,22 @@ export module updatecheck;
 
 import common;
 
-// Asks the GitHub API for the newest release tag and offers the download page once per release.
-// The answer is remembered in XIIIMongooseFix.update next to the asi, so this needs no ini setting.
 static constexpr auto szTitle = L"XIIIMongooseFix";
 
-// The same repository rsc_UpdateUrl points at, reached through the API instead.
+// Same address rsc_UpdateUrl puts in the version resource.
 static constexpr auto szUpdateUrl = L"https://github.com/TGP482/XIII-Mongoose-Fix";
 static constexpr auto szApiHost = L"api.github.com";
 static constexpr auto szApiPath = L"/repos/TGP482/XIII-Mongoose-Fix/releases/latest";
 
+// Answers live beside the asi, not in the ini.
 static constexpr auto szCacheName = L"XIIIMongooseFix.update";
 static constexpr auto nCacheTTLSeconds = 24 * 60 * 60;
 
-// Id of the RT_MANIFEST in Versioninfo.rc. 2 rather than 1: a dependency this asi activates for
-// itself, not a manifest for the process it loads into.
+// RT_MANIFEST id in Versioninfo.rc. 2 not 1: activated by this asi for itself, not by the host.
 static constexpr auto nManifestResourceId = 2;
 
-// CI passes the released version to premake as --with-version, so the first field is the release
-// number. A local build gets day.month.year instead, whose first field reads far ahead of any
-// release and so never prompts.
+// CI passes --with-version, so field one is the release number. A local build gets day.month.year,
+// which reads ahead of any release and never prompts.
 static constexpr auto szInstalledVersion = rsc_FileVersion;
 
 static std::wstring Widen(const std::string& text)
@@ -42,7 +39,7 @@ static std::wstring Widen(const std::string& text)
     return std::wstring(text.begin(), text.end());
 }
 
-// Releases are whole numbers, so 1.2.3, v2 and V2.0 read as V1, V2, V2.
+// Releases are whole numbers: 1.2.3, v2, V2.0 are V1, V2, V2.
 static int ParseVersion(const std::string& version)
 {
     size_t start = 0;
@@ -83,10 +80,8 @@ static std::filesystem::path GetCachePath()
     return GetThisModulePath<std::filesystem::path>() / szCacheName;
 }
 
-// Five lines: latest release, when it was fetched, the release already prompted for, the version
-// installed at the time, the release the tick box was ticked for. The installed line expires the
-// cache when the fix itself is updated. A cache written before the tick box existed has no fifth
-// line and reads as nothing silenced.
+// Five lines: latest release, fetch time, release already prompted for, installed version (expires
+// the cache on upgrade), release silenced. A pre-tick-box cache has no fifth line.
 static bool LoadCache(std::string& latest, std::string& mentioned, bool& bFresh, std::string& silenced)
 {
     std::ifstream file(GetCachePath());
@@ -130,8 +125,8 @@ static void SaveCache(const std::string& latest, const std::string& mentioned, c
     file << silenced << "\n";
 }
 
-// Every failure here ends the check silently. A firewalled machine gets no dialog and no stall,
-// hence 5s on all four timeouts. No releases yet answers 404, which is the same path.
+// Every failure ends the check silently; 5s on all four timeouts, so a firewalled machine does not
+// stall. No releases yet answers 404, same path.
 static bool QueryLatestVersion(std::string& latest)
 {
     const auto userAgent = std::wstring(L"XIIIMongooseFix/") + Widen(szInstalledVersion);
@@ -157,7 +152,7 @@ static bool QueryLatestVersion(std::string& latest)
         return false;
     }
 
-    // GitHub rejects a request with no user agent. The media type pins the reply shape.
+    // GitHub rejects a request with no user agent; the media type pins the reply shape.
     WinHttpAddRequestHeaders(hRequest, L"Accept: application/vnd.github+json", static_cast<DWORD>(-1), WINHTTP_ADDREQ_FLAG_ADD);
 
     std::string response;
@@ -182,7 +177,7 @@ static bool QueryLatestVersion(std::string& latest)
 
                 response.append(chunk, 0, nRead);
 
-                // tag_name sits near the front of the reply; the release body can run long.
+                // tag_name is near the front; the release body can run long.
                 if (response.size() > 256 * 1024)
                     break;
             } while (nAvailable > 0);
@@ -196,8 +191,8 @@ static bool QueryLatestVersion(std::string& latest)
     if (response.empty())
         return false;
 
-    // One field, so a regex rather than a json dependency. Tags are published as v1.2.3 and the v
-    // is not part of the version. Custom delimiter: the pattern's own )" would close a plain R"( ).
+    // One field, so regex over a json dependency. Tags are v1.2.3; the v is not part of the
+    // version. Custom delimiter: the pattern's own )" would close a plain R"( ).
     std::smatch match;
     const std::regex tag(R"rx("tag_name"\s*:\s*"\s*[vV]?([0-9][^"]*)")rx");
 
@@ -208,10 +203,8 @@ static bool QueryLatestVersion(std::string& latest)
     return true;
 }
 
-// TaskDialogIndirect is the only prompt with a tick box, and it lives in comctl32 version 6, which
-// a plain LoadLibrary never reaches: system32 holds 5.82 and that does not export it. The version 6
-// binding comes from an activation context built on this asi's own RT_MANIFEST, held open across
-// the load and the call.
+// TaskDialogIndirect is the only prompt with a tick box, and only comctl32 v6 exports it (system32
+// holds 5.82). Bound via an activation context on this asi's RT_MANIFEST, held across load and call.
 class ComCtl6Scope
 {
 public:
@@ -251,9 +244,8 @@ private:
     bool mActivated = false;
 };
 
-// Yes opens the page, No closes the prompt, the tick box answers for this release under either.
-// Fallback for a machine where the activation context or the export does not come together is
-// MB_YESNOCANCEL with Cancel standing in for the tick box.
+// Yes opens the page, No closes, the tick box answers for this release under either. Fallback when
+// the activation context or the export fails: MB_YESNOCANCEL, Cancel standing in for the tick box.
 static bool AskAboutUpdate(const std::wstring& instruction, const std::wstring& content, const std::wstring& verification, bool& bSilence)
 {
     bSilence = false;
@@ -336,7 +328,7 @@ static void CheckForUpdates()
         if (!QueryLatestVersion(fetched))
             return;
 
-        // A different release than the cached one has not been prompted for yet.
+        // A different release than the cached one has not been prompted for.
         if (CompareVersion(fetched, latest) != 0)
             mentioned.clear();
 
@@ -344,20 +336,18 @@ static void CheckForUpdates()
         SaveCache(latest, mentioned, silenced);
     }
 
-    // Installed ahead of the release is a local build, equal is up to date.
+    // Installed ahead of the release is a local build; equal is up to date.
     if (CompareVersion(szInstalledVersion, latest) >= 0)
         return;
 
-    // The tick box covers the release it was ticked for and nothing later, so V3 asks again after
-    // V2 was silenced.
+    // The tick box covers its own release and nothing later: V3 asks again after V2 was silenced.
     if (!silenced.empty() && CompareVersion(latest, silenced) <= 0)
         return;
 
     if (!mentioned.empty() && CompareVersion(mentioned, latest) == 0)
         return;
 
-    // Recorded before the prompt, so a crash or an alt-F4 while it is open does not repeat it next
-    // launch.
+    // Recorded before the prompt, so a crash while it is open does not repeat it next launch.
     SaveCache(latest, latest, silenced);
 
     auto bSilence = false;
@@ -367,8 +357,7 @@ static void CheckForUpdates()
         SaveCache(latest, latest, latest);
 }
 
-// On the main thread, so the game stays on hold until the prompt is answered. First of the startup
-// prompts, and skipped outright while the cache is fresh.
+// Main thread, so the game waits for the answer. First startup prompt; skipped on a fresh cache.
 static constexpr auto nStartupPromptPriority = 10;
 
 class UpdateCheck
