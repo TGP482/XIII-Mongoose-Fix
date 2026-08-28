@@ -39,6 +39,9 @@ static std::atomic<bool> bRumbleEnabled = true;
 static std::atomic<bool> bVibration = true;
 static std::atomic<uint64_t> nRumbleUntil = 0;
 
+// Rumble, the menu cursor and stick navigation all follow whichever device produced input last.
+static std::atomic<bool> bPadInput = false;
+
 // Pad is not always on user 0. First slot that answers wins.
 static DWORD XInputUser()
 {
@@ -142,7 +145,7 @@ static void PadThread()
 static void __fastcall StartEffect(void*, void*, int nPad, int, float fRumbleLeft, float fRumbleRight,
     float, float, float, float, float)
 {
-    if (nPad != 0 || !bRumbleEnabled || !bVibration)
+    if (nPad != 0 || !bRumbleEnabled || !bVibration || !bPadInput)
         return;
 
     StartPadThread();
@@ -178,6 +181,7 @@ static constexpr auto nKeyJoy1 = 200;
 
 static constexpr auto nInputActionPress = 1;
 static constexpr auto nInputActionRelease = 3;
+static constexpr auto nInputActionAxis = 4;
 
 // Xbox button order, from the game's script: XIIIMPBotInteraction PF_XBOX puts the d-pad on Joy9 to
 // Joy12, XIIIMenuPressStart treats Joy13 as start. Shoulders take Black and White's slots.
@@ -246,6 +250,31 @@ static uint16_t nHeldButtons = 0;
 // No setting: the pad turns itself on the first time it reports anything, and the byte patch goes in
 // at that moment, so a keyboard-only machine runs an untouched game.
 static bool bPadActive = false;
+
+// Every keyboard, mouse and pad event reaches UWindowsViewport::CauseInputEvent, so one hook there
+// tells the sources apart by key code. Releases ignored: the key sweep issues them for keys nobody
+// pressed.
+static SafetyHookInline shCauseInputEvent{};
+
+// The cursor branch in UGUIController::NativePostRender, jumped over. Not a NOP over the draw call
+// itself: the epilogue pops EBX, ESI and EDI before restoring ESP, so the abandoned arguments came
+// back as registers and the interaction loop above walked off a garbage array.
+static std::unique_ptr<raw_mem> patchHideCursor;
+
+static void SetPadInput(bool bPad)
+{
+    if (bPadInput.exchange(bPad) != bPad && patchHideCursor)
+        patchHideCursor->Set(bPad);
+}
+
+// Only buttons: pad axes go in through DirectAxis, never here.
+static int __fastcall CauseInputEvent(void* pThis, void*, int nKey, int nAction, float fDelta)
+{
+    if (nAction == nInputActionPress || (nAction == nInputActionAxis && fDelta != 0.0f))
+        SetPadInput(nKey >= nKeyJoy1 && nKey < nKeyJoy1 + static_cast<int>(nButtonCount));
+
+    return shCauseInputEvent.fastcall<int>(pThis, nullptr, nKey, nAction, fDelta);
+}
 
 // UpdateInput ends by sweeping keys 0 to 255, asking GetKeyState about anything unhandled that
 // frame. 200 and up are Joy and axis codes, not virtual keys, so the sweep answers "up" and releases
@@ -400,6 +429,10 @@ static void FeedPad(void* pViewport)
     if (!pInput)
         return;
 
+    // Sticks, since only buttons reach the CauseInputEvent hook.
+    if (state.fLeftX || state.fLeftY || state.fRightX || state.fRightY)
+        SetPadInput(true);
+
     const auto fLookScale = fInputRange / fEngineAxisScale;
     const auto fMoveScale = fLookScale / fFrameFactor;
 
@@ -451,6 +484,78 @@ static int __fastcall NativeKeyEvent(void* pThis, void*, uint8_t* pKey, uint8_t*
     }
 
     return shNativeKeyEvent.fastcall<int>(pThis, nullptr, pKey, pState, fDelta);
+}
+
+// Menus read raw keyboard codes, so the left stick nudges them with arrow presses. Sent to the
+// original NativeKeyEvent, which consumes nothing while no menu is up, so gameplay never sees them.
+static SafetyHookInline shNativeTick{};
+
+// UGUIController::MenuStack.Num, and MouseX, followed by MouseY, LastMouseX, LastMouseY.
+static constexpr auto nMenuStackNumOffset = 0x40;
+static constexpr auto nMouseXOffset = 0x90;
+
+static constexpr auto fNavThreshold = 0.5f;
+static constexpr auto fNavDelayFirst = 0.4f;
+static constexpr auto fNavDelayRepeat = 0.12f;
+
+static int nNavKey = 0;
+static float fNavTimer = 0.0f;
+static bool bNavRepeating = false;
+
+static void __fastcall NativeTick(void* pThis, void*, float fDeltaTime)
+{
+    shNativeTick.fastcall<void>(pThis, nullptr, fDeltaTime);
+
+    if (!shNativeKeyEvent || !bPadInput
+        || !*reinterpret_cast<int*>(static_cast<uint8_t*>(pThis) + nMenuStackNumOffset))
+        return;
+
+    // Skipping the branch skips the LastMouse write inside it, and UGUIVertList::Draw would then see
+    // HasMouseMoved every frame and drag the selection back under the cursor.
+    auto pMouse = reinterpret_cast<int*>(static_cast<uint8_t*>(pThis) + nMouseXOffset);
+    pMouse[2] = pMouse[0];
+    pMouse[3] = pMouse[1];
+
+    PadState state{};
+    {
+        std::scoped_lock lock(mutexPad);
+        state = padState;
+    }
+
+    // Vertical wins a diagonal: menus are lists.
+    int nKey = 0;
+    if (state.fLeftY > fNavThreshold)
+        nKey = 0x26;
+    else if (state.fLeftY < -fNavThreshold)
+        nKey = 0x28;
+    else if (state.fLeftX > fNavThreshold)
+        nKey = 0x27;
+    else if (state.fLeftX < -fNavThreshold)
+        nKey = 0x25;
+
+    if (nKey != nNavKey)
+    {
+        nNavKey = nKey;
+        fNavTimer = 0.0f;
+        bNavRepeating = false;
+    }
+
+    if (!nKey)
+        return;
+
+    fNavTimer -= fDeltaTime;
+    if (fNavTimer > 0.0f)
+        return;
+
+    auto nMenuKey = static_cast<uint8_t>(nKey);
+    uint8_t nPress = nInputActionPress;
+    uint8_t nRelease = nInputActionRelease;
+
+    shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nPress, fDeltaTime);
+    shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nRelease, fDeltaTime);
+
+    fNavTimer = bNavRepeating ? fNavDelayRepeat : fNavDelayFirst;
+    bNavRepeating = true;
 }
 
 static SafetyHookInline shDealWithPlayerInputEvent{};
@@ -553,6 +658,8 @@ static void InitWinDrv()
         return;
     }
 
+    shCauseInputEvent = safetyhook::create_inline(pCauseInputEvent, CauseInputEvent);
+
     fnViewportInput = FeedPad;
 }
 
@@ -566,6 +673,23 @@ static void InitGUI()
         shNativeKeyEvent = safetyhook::create_inline(p, NativeKeyEvent);
     else
         LogWarn("Controller: GUI key entry not found, pad cannot drive menus");
+
+    if (auto p = GetProcAddress(hGUI, "?NativeTick@UGUIController@@UAEXM@Z"))
+        shNativeTick = safetyhook::create_inline(p, NativeTick);
+    else
+        LogWarn("Controller: GUI tick not found, no stick menu navigation");
+
+    // MOV EAX,[ESI+0x2c] / TEST byte [EAX+0x38],1 / JNZ, the bShowWindowsMouse test. The jump becomes
+    // an unconditional one to the epilogue, the stack state the untaken branch already reaches.
+    auto patternCursor = module_pattern(L"GUI.dll", "8B 46 2C F6 40 38 01 0F 85 DE 01 00 00");
+    if (patternCursor.empty())
+    {
+        LogWarn("Controller: menu cursor branch not found, the cursor stays on with a pad");
+        return;
+    }
+
+    patchHideCursor = std::make_unique<raw_mem>(patternCursor.get_first(7),
+        std::initializer_list<uint8_t>{ 0xE9, 0xCC, 0x01, 0x00, 0x00, 0x90 });
 }
 
 static void InitEngine()

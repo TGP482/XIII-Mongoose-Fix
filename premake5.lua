@@ -91,7 +91,7 @@ workspace "XIIIMongooseFix"
       "external/injector/safetyhook/src/vmt_hook.cpp",
    }
    files { "external/injector/zydis/Zydis.h", "external/injector/zydis/Zydis.c" }
-   files { "data/bin/plugins/*.ini" }
+   files { "data/system/plugins/*.ini" }
 
    characterset ("Unicode")
 
