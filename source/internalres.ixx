@@ -275,6 +275,22 @@ static void DrawQuad(void* pDev)
     Call<nSetTextureSlot, HRESULT>(pDev, 0u, static_cast<void*>(nullptr));
 }
 
+// Called by display inside its UD3DRenderDevice::Lock hook, before the original runs.
+//
+// Lock builds the D3D viewport rect from whichever UViewport it is handed, not from the render
+// device, and asserts if that rect is larger than the bound target. SetRes only ever hands over
+// one viewport: XIII opens four, and a borderless window resize puts the output size back into
+// one of them without a SetRes. Either way a viewport reaches Lock still holding the output size
+// while the smaller target is bound, so the size goes on whichever one is actually drawn.
+export void StampInternalResViewport(uint8_t* pViewport)
+{
+    if (!bActive || !pViewport)
+        return;
+
+    *reinterpret_cast<int*>(pViewport + nOffsetViewportSizeX) = nRenderX;
+    *reinterpret_cast<int*>(pViewport + nOffsetViewportSizeY) = nRenderY;
+}
+
 // Called by display inside its UD3DRenderDevice::Present hook, before the original runs.
 export void PresentInternalRes(uint8_t* pRenderDevice)
 {

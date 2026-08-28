@@ -73,6 +73,7 @@ static std::atomic<bool> bDisplayChangePending = false;
 // Reset and device-lost recovery, so everything display related is decided here and nowhere else.
 static SafetyHookInline shSetRes{};
 static SafetyHookInline shPresent{};
+static SafetyHookInline shLock{};
 
 // D3DSWAPEFFECT_COPY_VSYNC is the only windowed vsync Direct3D 8 has, and it rules out the
 // multisampling MSAA needs. Windowed presents go through the compositor anyway, so the frame is
@@ -246,7 +247,8 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     ApplyDisplayMode(nMode, nOutputWidth, nOutputHeight);
 
     // Stamps the internal render size over SizeX/SizeY, so the read below reports it.
-    ApplyInternalRes(pThis, reinterpret_cast<uint8_t*>(pViewport));
+    if (shLock)
+        ApplyInternalRes(pThis, reinterpret_cast<uint8_t*>(pViewport));
 
     nBackBufferWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
     nBackBufferHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
@@ -258,6 +260,13 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
 
     onDeviceResetEvent().executeAll();
     return nResult;
+}
+
+// Every frame, for whichever viewport is being drawn.
+static void* __fastcall Lock(uint8_t* pThis, void*, void* pViewport, uint8_t* pHitData, int* pHitSize)
+{
+    StampInternalResViewport(reinterpret_cast<uint8_t*>(pViewport));
+    return shLock.fastcall<void*>(pThis, nullptr, pViewport, pHitData, pHitSize);
 }
 
 // The ini watcher runs on its own thread and must not touch the device there. Present is the one
@@ -296,6 +305,7 @@ static void InitD3DDrv()
     // that matter are asked for by name instead of scanned for.
     auto pSetRes = GetProcAddress(hD3DDrv, "?SetRes@UD3DRenderDevice@@UAEHPAVUViewport@@HHH@Z");
     auto pPresent = GetProcAddress(hD3DDrv, "?Present@UD3DRenderDevice@@UAEXPAVUViewport@@@Z");
+    auto pLock = GetProcAddress(hD3DDrv, "?Lock@UD3DRenderDevice@@UAEPAVFRenderInterface@@PAVUViewport@@PAEPAH@Z");
 
     if (!pSetRes || !pPresent)
     {
@@ -319,6 +329,12 @@ static void InitD3DDrv()
 
     shSetRes = safetyhook::create_inline(pSetRes, SetRes);
     shPresent = safetyhook::create_inline(pPresent, Present);
+
+    if (pLock)
+        shLock = safetyhook::create_inline(pLock, Lock);
+
+    if (!shLock)
+        LogWarn("Display: UD3DRenderDevice::Lock could not be hooked, an internal resolution is unsafe and stays off");
 
     // Resolution and vsync both need a device reset, so a change asks for one rather than applying
     // anything itself.
