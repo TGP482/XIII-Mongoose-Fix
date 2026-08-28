@@ -11,7 +11,7 @@ workspace "XIIIMongooseFix"
    cppdialect "C++latest"
    kind "SharedLib"
    language "C++"
-   targetdir "bin/%{cfg.buildcfg}"
+   targetdir "data/system/plugins"
    targetextension ".asi"
    buildoptions { "/dxifcInlineFunctions-" }
 
@@ -128,7 +128,7 @@ workspace "XIIIMongooseFix"
             debugdir (gamepath .. (dir or ""))
          end
       end
-      targetdir ("bin")
+      targetdir ("data/system/plugins")
    end
 
    filter "configurations:Debug"
