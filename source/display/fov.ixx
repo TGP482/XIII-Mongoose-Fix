@@ -9,18 +9,19 @@ import settings;
 import logging;
 import display;
 
-// FOV be script property: no native clamp to widen, no config to write. Native part be moment
-// camera get built. UGameEngine::Draw read view actor FovAngle, hand to FCameraSceneNode, once
-// for world pass, once for pass interface draw over. Rewrite value in flight, script side stay
-// untouched: nothing reach User.ini, nothing fight game own zoom.
+// FOV is a script property: no native clamp to widen, no config to write. The only native moment
+// is where the camera is built. UGameEngine::Draw reads the view actor's FovAngle and hands it to
+// FCameraSceneNode, once for the world pass and once for the pass the interface draws over.
+// Rewriting it in flight leaves the script side alone, so nothing reaches User.ini and nothing
+// fights the game's own zoom.
 //
-// Value not replaced, rescaled. Weapon zoom levels authored as factors of stock 85 degrees, so
-// scope opening at fixed number zoom different amount at every FOV setting. Go through tangent,
-// every zoom keep magnification it had.
+// Rescaled, not replaced: weapon zoom levels are authored as factors of the stock 85 degrees, so a
+// scope that opens at a fixed number would zoom by a different amount at every FOV setting. Going
+// through the tangent keeps each zoom at the magnification it had.
 //
-// FovAngle be horizontal, vertical half come from viewport, so wide screen only cut height off
-// 4:3 image. Same tangent scaling widen back by aspect ratio: vertical angle hold still, one FOV
-// number look same everywhere.
+// FovAngle is horizontal and the vertical half comes from the viewport, so a wide screen only cuts
+// height off the 4:3 image. The same tangent scaling widens back by the aspect ratio, holding the
+// vertical angle still, so one FOV number looks the same everywhere.
 static constexpr auto fPi = 3.14159265358979323846;
 static constexpr auto fStockAspect = 4.0 / 3.0;
 static constexpr auto fMinFieldOfView = 1.0f;
@@ -33,8 +34,8 @@ static SafetyHookMid mhOverlayPass{};
 static SafetyHookMid mhViewmodel{};
 static SafetyHookMid mhWorldToScreen{};
 
-// How much wider than 4:3 tangent of horizontal half angle must be for vertical half angle to
-// come out same.
+// How much wider than 4:3 the horizontal half angle's tangent has to be for the vertical half
+// angle to come out the same.
 static double AspectZoom()
 {
     const auto nWidth = nBackBufferWidth.load();
@@ -66,7 +67,7 @@ static float ScaleFieldOfView(float fSource)
     return std::clamp(static_cast<float>(fResult), fMinFieldOfView, fMaxFieldOfView);
 }
 
-// Register hold float bits of FovAngle, on way to camera scene node.
+// The register holds the float bits of FovAngle on the way to the camera scene node.
 static void Apply(uintptr_t& nRegister)
 {
     float fValue = 0.0f;
@@ -82,16 +83,16 @@ static void ApplyToContext(SafetyHookContext& ctx)
     Apply(ctx.ecx);
 }
 
-// UInteraction::WorldToScreen build camera node of own off same FovAngle. Unscaled, so every box
-// script put round actor land off by that.
+// UInteraction::WorldToScreen builds a camera node of its own from the same FovAngle. Left
+// unscaled, every box script puts around an actor lands off by that much.
 static void ApplyToWorldToScreen(SafetyHookContext& ctx)
 {
     Apply(ctx.edx);
 }
 
-// First person mesh not drawn through camera node: level renderer swap in own projection. Half
-// angle be literal pushed straight into matrix, so no FOV setting to follow here, only same
-// aspect correction camera pass get.
+// The first person mesh is not drawn through the camera node; the level renderer swaps in its own
+// projection with the half angle as a literal pushed straight into the matrix. No FOV setting to
+// follow here, only the aspect correction the camera pass gets.
 static void ApplyToViewmodel(SafetyHookContext& ctx)
 {
     const auto fZoom = AspectZoom();
@@ -107,12 +108,12 @@ static void ApplyToViewmodel(SafetyHookContext& ctx)
 static void InitEngine()
 {
     // MOV EAX,[ESI+0x30] (Viewport->Actor) / MOV ECX,[EAX+0x1F8] (Actor->FovAngle) / MOV EAX,...
-    // Overlay pass set render flag between two moves: that be what tell them apart.
+    // The overlay pass sets a render flag between the two moves, which is what tells them apart.
     auto patternWorld = module_pattern(L"Engine.dll", "8B 46 30 8B 88 F8 01 00 00 8B 45 D0 51");
     auto patternOverlay = module_pattern(L"Engine.dll", "8B 46 30 C7 86 58 01 00 00 01 00 00 00 8B 88 F8 01 00 00 8B 45 D0 51");
 
-    // FILD SizeX / FSTP [ESP] / PUSH 0.43633: last argument onto stack be half angle, 25 degrees,
-    // ahead of call that build first person projection matrix.
+    // FILD SizeX / FSTP [ESP] / PUSH 0.43633: the last argument pushed is the half angle, 25
+    // degrees, ahead of the call that builds the first person projection matrix.
     auto patternViewmodel = module_pattern(L"Engine.dll", "DB 86 88 00 00 00 D9 1C 24 68 BE 65 DF 3E E8");
 
     if (patternWorld.empty() && patternOverlay.empty())
@@ -121,7 +122,7 @@ static void InitEngine()
         return;
     }
 
-    // Hooked one instruction past load, so register already hold value.
+    // Hooked one instruction past the load, so the register already holds the value.
     if (!patternWorld.empty())
         mhWorldPass = safetyhook::create_mid(patternWorld.get_first(9), ApplyToContext);
 

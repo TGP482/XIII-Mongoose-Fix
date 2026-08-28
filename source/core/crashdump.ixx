@@ -11,13 +11,11 @@ export module crashdump;
 import common;
 import logging;
 
-// The engine wraps its main loop in a catch all, so a fault unwinds every guard and ends at
-// Window.dll's crash box with the stack that caused it already gone. A vectored handler runs before
-// any of that: the dump is taken on the faulting thread, at the faulting instruction.
-//
-// Only faults nothing recovers from are taken; anything a probe or a driver raises and handles is
-// left alone. Fatal errors the engine raises itself never become an exception, so the box is hooked
-// as well, though that dump is post unwind, but it is what there is.
+// The engine wraps its main loop in a catch all, so a fault unwinds every guard and reaches
+// Window.dll's crash box with the stack that caused it already gone. A vectored handler runs first
+// and dumps on the faulting thread, at the faulting instruction. Only unrecoverable codes are
+// taken; anything a probe or a driver raises and handles is left alone. Engine raised fatal errors
+// never become an exception, so the box is hooked too, post unwind.
 static std::atomic_flag bDumped;
 static SafetyHookInline shOnInitDialog{};
 
@@ -77,10 +75,10 @@ static void WriteDump(EXCEPTION_POINTERS* pInfo)
         path.filename().string());
 }
 
-// IsBadReadPtr and IsBadWritePtr test a pointer by touching it and catching the fault, and
-// safetyhook probes that way before unhooking an object the game may already have freed. Handed a
-// released D3D device it faults, catches it, answers no, and carries on. A vectored handler sees
-// that first chance and would kill the process over a question that was already answered.
+// IsBadReadPtr and IsBadWritePtr answer by touching the pointer and catching the fault, and
+// safetyhook probes that way before unhooking an object the game may already have freed. The
+// vectored handler sees that first chance fault and would kill the process over a question the
+// probe already answered.
 static bool IsProbe(const void* pAddress)
 {
     HMODULE hModule = nullptr;

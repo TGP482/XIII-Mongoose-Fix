@@ -69,7 +69,7 @@ workspace "XIIIMongooseFix"
 
    includedirs { "source" }
    includedirs { "source/includes" }
-   files { "source/*.h", "source/*.hpp", "source/*.cpp", "source/*.hxx", "source/*.ixx" }
+   files { "source/**.h", "source/**.hpp", "source/**.cpp", "source/**.hxx", "source/**.ixx" }
    files { "source/resources/Versioninfo.rc" }
 
    includedirs { "external/hooking" }
