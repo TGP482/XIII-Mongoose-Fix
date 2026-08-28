@@ -44,7 +44,7 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 ### General
 - **Skip Intro** - Skips the Ubisoft, alien and nvidia logo movies the exe plays before the menu.
 
-### Mongoose Fixes
+### Fixes
 - Fixed mouse movement breaking with high polling rates and removed the deadzone.
 - Fixed an issue where mouse sensitivity changed with the field of view.
 - Fixed HUD elements, menus, blur effects and comic panels not scaling properly with resolution.

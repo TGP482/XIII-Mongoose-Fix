@@ -199,6 +199,23 @@ static void __fastcall DrawLine(uint8_t* pThis, void*, float fX1, float fY1, flo
     }
 }
 
+// WorldToScreen project through viewport, not canvas, so it answer real pixels whatever canvas
+// report. Script draw target boxes with that, HUD pass scale it again. Give it pass units.
+static SafetyHookInline shWorldToScreen{};
+
+static void __fastcall WorldToScreen(uint8_t* pThis, void*, void* pStack, float* pResult)
+{
+    shWorldToScreen.thiscall<void>(pThis, pStack, pResult);
+
+    if (!pResult || !bHudPass.load())
+        return;
+
+    const auto fScale = fHudScale.load();
+
+    pResult[0] /= fScale;
+    pResult[1] /= fScale;
+}
+
 static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pResult)
 {
     shSetOrigin.thiscall<void>(pCanvas, pStack, pResult);
@@ -1003,6 +1020,9 @@ static void InitEngine()
     {
         LogWarn("HudScale: the canvas vtable was not found, menu panels ignore the centring origin");
     }
+
+    if (auto pWorldToScreen = GetProcAddress(hEngine, "?execWorldToScreen@UInteraction@@QAEXAAUFFrame@@QAX@Z"))
+        shWorldToScreen = safetyhook::create_inline(pWorldToScreen, WorldToScreen);
 
     if (auto pSetOrigin = GetProcAddress(hEngine, "?execSetOrigin@UCanvas@@QAEXAAUFFrame@@QAX@Z"))
         shSetOrigin = safetyhook::create_inline(pSetOrigin, SetOrigin);

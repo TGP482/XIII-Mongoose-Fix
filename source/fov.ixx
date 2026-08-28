@@ -31,6 +31,7 @@ static std::atomic<float> fFieldOfView = fStockFieldOfView;
 static SafetyHookMid mhWorldPass{};
 static SafetyHookMid mhOverlayPass{};
 static SafetyHookMid mhViewmodel{};
+static SafetyHookMid mhWorldToScreen{};
 
 // How much wider than 4:3 tangent of horizontal half angle must be for vertical half angle to
 // come out same.
@@ -65,16 +66,27 @@ static float ScaleFieldOfView(float fSource)
     return std::clamp(static_cast<float>(fResult), fMinFieldOfView, fMaxFieldOfView);
 }
 
-// ECX hold float bits of FovAngle here, on way to being pushed as last argument of camera scene
-// node.
-static void ApplyToContext(SafetyHookContext& ctx)
+// Register hold float bits of FovAngle, on way to camera scene node.
+static void Apply(uintptr_t& nRegister)
 {
     float fValue = 0.0f;
-    std::memcpy(&fValue, &ctx.ecx, sizeof(fValue));
+    std::memcpy(&fValue, &nRegister, sizeof(fValue));
 
     fValue = ScaleFieldOfView(fValue);
 
-    std::memcpy(&ctx.ecx, &fValue, sizeof(fValue));
+    std::memcpy(&nRegister, &fValue, sizeof(fValue));
+}
+
+static void ApplyToContext(SafetyHookContext& ctx)
+{
+    Apply(ctx.ecx);
+}
+
+// UInteraction::WorldToScreen build camera node of own off same FovAngle. Unscaled, so every box
+// script put round actor land off by that.
+static void ApplyToWorldToScreen(SafetyHookContext& ctx)
+{
+    Apply(ctx.edx);
 }
 
 // First person mesh not drawn through camera node: level renderer swap in own projection. Half
@@ -120,6 +132,12 @@ static void InitEngine()
         mhViewmodel = safetyhook::create_mid(patternViewmodel.get_first(14), ApplyToViewmodel);
     else
         LogWarn("FieldOfView: first person projection pattern not matched, the viewmodel keeps the 4:3 framing");
+
+    // MOV EDX,[EBX+0x1F8] (PlayerController->FovAngle) / PUSH EDX, one instruction back.
+    auto patternWorldToScreen = module_pattern(L"Engine.dll", "8B 93 F8 01 00 00 52 8B 55 D8 83 EC 0C");
+
+    if (!patternWorldToScreen.empty())
+        mhWorldToScreen = safetyhook::create_mid(patternWorldToScreen.get_first(6), ApplyToWorldToScreen);
 
     BindFloat(fFieldOfView, PREF_FIELDOFVIEW);
 }

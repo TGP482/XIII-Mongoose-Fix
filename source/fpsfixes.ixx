@@ -32,6 +32,7 @@ static const char* (__thiscall* pGetName)(void*) = nullptr;
 static void(__fastcall* pStep)(void*, void*, void*, void*) = nullptr;
 
 static auto bFocusTurn = false;
+static auto bNoControl = false;
 
 static const char* StateName(void* pObject)
 {
@@ -117,7 +118,9 @@ static int __fastcall ControllerTick(void* pThis, void*, float fDelta, int nTick
 // player driving the camera.
 static int __fastcall PlayerTick(void* pThis, void*, float fDelta, int nTickType)
 {
-    return Tick(shPlayerTick, pThis, fDelta, nTickType, pThis && !strcmp(StateName(pThis), "NoControl"));
+    bNoControl = pThis && !strcmp(StateName(pThis), "NoControl");
+
+    return Tick(shPlayerTick, pThis, fDelta, nTickType, bNoControl);
 }
 
 // MoveActor sweeps 2 units past the delta, parks 2 units short of the impact. Blocked move returns
@@ -252,9 +255,13 @@ static void Advance(void* pPawn, float fDelta, int nIterations)
 }
 
 // startNewPhysics re-enters these inside a step. Only the outermost call accumulates.
+//
+// Cutscene pick velocity for frame it measure: min( distance / dt, speed ). Fixed step run it a
+// thirtieth instead, eight times far at 240 fps, so pawn overshoot mark and come back each step.
+// Camera aim off pawn location, so it read as shake. Script own move here, give frame back.
 static bool Passthrough(void* pPawn, float fDelta)
 {
-    return bStepping || !pPawn || !(fDelta > 0.0f) || !pIsHumanControlled(pPawn);
+    return bStepping || bNoControl || !pPawn || !(fDelta > 0.0f) || !pIsHumanControlled(pPawn);
 }
 
 static void __fastcall PhysWalking(void* pThis, void*, float fDelta, int nIterations)
