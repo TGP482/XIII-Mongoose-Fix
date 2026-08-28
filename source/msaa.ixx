@@ -174,12 +174,9 @@ static void ApplyMSAA(D3DPRESENT_PARAMETERS8* pParams)
 
     const auto nGot = static_cast<int>(pParams->nMultiSampleType);
 
-    // D3D8 allows multisampling on DISCARD only, which costs display.ixx its windowed vsync.
-    if (nGot > 0 && pParams->nSwapEffect != D3DSWAPEFFECT_DISCARD)
-    {
+    // D3D8 allows multisampling on DISCARD only.
+    if (nGot > 0)
         pParams->nSwapEffect = D3DSWAPEFFECT_DISCARD;
-        LogWarn("MSAA: swap effect forced to DISCARD, windowed vsync is off while MSAA is on");
-    }
 
     if (std::exchange(nLastApplied, nGot) == nGot)
         return;

@@ -1,6 +1,9 @@
 module;
 
 #include <common.hxx>
+#include <dwmapi.h>
+
+#pragma comment(lib, "dwmapi.lib")
 
 export module display;
 
@@ -71,11 +74,10 @@ static std::atomic<bool> bDisplayChangePending = false;
 static SafetyHookInline shSetRes{};
 static SafetyHookInline shPresent{};
 
-// The swap effect is computed as (Windowed ? 3 : 1) by one LEA. Bumping the +1 to +2 turns the
-// windowed case into D3DSWAPEFFECT_COPY_VSYNC, which is how Direct3D 8 asks for windowed vsync -
-// the presentation interval may only be DEFAULT there. Fullscreen becomes FLIP instead of DISCARD,
-// so the patch goes on for windowed vsync only.
-static std::unique_ptr<raw_mem> patchWindowedSwapEffect;
+// D3DSWAPEFFECT_COPY_VSYNC is the only windowed vsync Direct3D 8 has, and it rules out the
+// multisampling MSAA needs. Windowed presents go through the compositor anyway, so the frame is
+// paced against it in Present instead and the swap effect is left alone.
+static bool bWindowedVSync = false;
 
 // Fullscreen mode picking scores every display mode by |refresh - 75| and takes the lowest, so a
 // 75 Hz mode wins on any monitor that has one and the frame rate is pinned there whatever the cap
@@ -226,19 +228,15 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
 
     const auto bVSync = MongooseFixSettings.GetInt(PREF_VSYNC) != 0;
 
-    // Fullscreen honours this field itself; windowed needs the swap effect instead.
+    // Fullscreen honours this field itself; windowed is paced in Present.
     *reinterpret_cast<int*>(pThis + nOffsetUseVSync) = bVSync ? 1 : 0;
 
-    if (patchWindowedSwapEffect)
-        patchWindowedSwapEffect->Set(bVSync && nFullscreen == 0);
+    bWindowedVSync = bVSync && nFullscreen == 0;
 
     // Our render target is D3DPOOL_DEFAULT and SetRes resets the device, so it goes first.
     ReleaseInternalRes();
 
     const auto nResult = shSetRes.fastcall<int>(pThis, nullptr, pViewport, nX, nY, nFullscreen);
-
-    if (patchWindowedSwapEffect)
-        patchWindowedSwapEffect->Restore();
 
     nOutputWidth = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
     nOutputHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
@@ -280,6 +278,11 @@ static void __fastcall Present(uint8_t* pThis, void*, void* pViewport)
         ApplyDisplayMode(MongooseFixSettings.GetInt(PREF_DISPLAYMODE), nOutputWidth, nOutputHeight);
 
     PresentInternalRes(pThis);
+
+    // Blocks until the next composition frame, so the window gets one present per refresh.
+    if (bWindowedVSync)
+        DwmFlush();
+
     shPresent.fastcall<void>(pThis, nullptr, pViewport);
 }
 
@@ -299,13 +302,6 @@ static void InitD3DDrv()
         LogWarn("Display: D3DDrv.dll did not export SetRes or Present, display options are off");
         return;
     }
-
-    // LEA ECX,[ECX+ECX*1+1] / MOV [EBP-0x88],ECX: the swap effect written into present parameters.
-    auto patternSwapEffect = module_pattern(L"D3DDrv.dll", "8D 4C 09 01 89 8D 78 FF FF FF");
-    if (!patternSwapEffect.empty())
-        patchWindowedSwapEffect = std::make_unique<raw_mem>(patternSwapEffect.get_first(3), std::initializer_list<uint8_t>{ 0x02 });
-    else
-        LogWarn("Display: swap effect pattern not found, windowed vsync is off");
 
     // SUB EAX,0x4B / JNS / NEG EAX: the abs distance to 75. NEG EAX alone leaves the score as
     // -refresh, so the highest mode wins the tie break.
