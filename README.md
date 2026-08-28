@@ -29,7 +29,7 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 - **MSAA** - Enables multisample antialiasing at 2, 4 or 8 samples.
 
 ### Gameplay
-- **Mouse Look Sensitivity** - Adjusts mouse look sensitivity, which the game has no option for.
+- **Mouse Look Sensitivity** - Adjusts mouse look sensitivity.
 - **Mouse Smoothing** - Toggles mouse smoothing on and off.
 
 ### Field of View
