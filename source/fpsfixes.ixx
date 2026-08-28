@@ -119,18 +119,14 @@ static int __fastcall ControllerTick(void* pThis, void*, float fDelta, int nTick
 static int __fastcall PlayerTick(void* pThis, void*, float fDelta, int nTickType)
 {
     bNoControl = pThis && !strcmp(StateName(pThis), "NoControl");
-
     return Tick(shPlayerTick, pThis, fDelta, nTickType, bNoControl);
 }
 
-// MoveActor sweeps 2 units past the delta, parks 2 units short of the impact. Blocked move returns
-// Delta minus 2, under 2 units returns nothing. Fixed loss per call, calls scale with frame rate:
-// 60 uu/s at 30 fps, 480 uu/s at 240, past walk speed. In a gap the pawn grazes every frame, so
-// unlocked it never advances.
-// Walking and falling share one 1/30 accumulator. Shared, so leftover time survives a takeoff or a
-// landing instead of dropping a step at each.
-// Location and Velocity both step. Drawn state lerps the last two. Velocity too: bob scales by
-// speed, a stepped speed staircases the bob and reads as a stuttering viewmodel.
+// MoveActor parks 2 units short of an impact. Fixed loss per call, calls scale with frame rate: 60
+// uu/s at 30 fps, 480 at 240, past walk speed. In a gap the pawn grazes every frame, never advances.
+// One 1/30 accumulator for walking and falling, so leftover time survives takeoff and landing.
+// Drawn state lerps the last two steps. Velocity too: bob scales by speed, stepped speed staircases
+// the bob into a stuttering viewmodel.
 static constexpr auto fFixedStep = 1.0f / 30.0f;
 static constexpr auto nMaxSteps = 8;
 static constexpr auto nOffsetLocation = 0xCC;
@@ -190,53 +186,55 @@ static FMove Lerp(const FMove& a, const FMove& b, float t)
     return { Lerp(a.Location, b.Location, t), Lerp(a.Velocity, b.Velocity, t) };
 }
 
+// State can flip mid step. Pick handler per call.
+static void Step(void* pPawn, float fDelta, int nIterations)
+{
+    auto& sh = Physics(pPawn) == nPhysFalling ? shPhysFalling : shPhysWalking;
+
+    bStepping = true;
+    sh.fastcall<void>(pPawn, nullptr, fDelta, nIterations);
+    bStepping = false;
+}
+
 static void Advance(void* pPawn, float fDelta, int nIterations)
 {
     static FMove mBack{}, mFront{}, mDrawn{};
     static auto fPending = 0.0f;
-    static auto bHeld = false;
 
-    // Anything else that moved the pawn wins: teleports, movers, script. Velocity is tested on its
-    // own, a jump rewrites Velocity and leaves Location alone.
+    // Location moved since our write: something else owns the pawn. Rope and hook stay PHYS_Falling
+    // and rewrite Location and Velocity every frame, a 1/30 step drops a whole frame of gravity on
+    // the swing. Movers and teleports read the same. Give the frame back, rebaseline after.
     const auto mNow = Read(pPawn);
-    if (!bHeld || mNow.Location != mDrawn.Location)
+    if (mNow.Location != mDrawn.Location)
     {
-        mBack = mFront = mNow;
+        Step(pPawn, fDelta, nIterations);
+
+        mBack = mFront = mDrawn = Read(pPawn);
         fPending = 0.0f;
-    }
-    else
-    {
-        if (mNow.Velocity != mDrawn.Velocity)
-            mBack.Velocity = mFront.Velocity = mNow.Velocity;
 
-        Write(pPawn, mFront);
+        return;
     }
 
-    bHeld = false;
+    // Jump rewrites Velocity, leaves Location alone.
+    if (mNow.Velocity != mDrawn.Velocity)
+        mBack.Velocity = mFront.Velocity = mNow.Velocity;
+
+    Write(pPawn, mFront);
+
     fPending += fDelta;
 
-    auto nSteps = 0;
-    while (fPending >= fFixedStep && nSteps < nMaxSteps)
-    {
-        fPending -= fFixedStep;
-        nSteps++;
-    }
+    auto nSteps = static_cast<int>(fPending / fFixedStep);
+    if (nSteps > nMaxSteps)
+        nSteps = nMaxSteps;
 
-    if (nSteps == nMaxSteps)
-        fPending = 0.0f;
+    fPending = nSteps == nMaxSteps ? 0.0f : fPending - nSteps * fFixedStep;
 
-    bStepping = true;
     for (auto i = 0; i < nSteps; i++)
     {
         mBack = mFront;
-
-        // State can flip inside a step. Pick the handler per step, not per frame.
-        auto& sh = Physics(pPawn) == nPhysFalling ? shPhysFalling : shPhysWalking;
-        sh.fastcall<void>(pPawn, nullptr, fFixedStep, nIterations);
-
+        Step(pPawn, fFixedStep, nIterations);
         mFront = Read(pPawn);
     }
-    bStepping = false;
 
     // Other states drive the pawn themselves. Hand it back untouched.
     const auto nPhysics = Physics(pPawn);
@@ -246,19 +244,15 @@ static void Advance(void* pPawn, float fDelta, int nIterations)
         return;
     }
 
-    // ponytail: raw write, no collision hash update. Interpolated offset never exceeds one 1/30
-    // step, hash buckets far coarser, entry stays correct. Route through MoveActor if a trace ever
-    // misses the player.
+    // ponytail: raw write, no collision hash update. Offset never exceeds one 1/30 step, hash
+    // buckets far coarser. Route through MoveActor if a trace ever misses the player.
     mDrawn = Lerp(mBack, mFront, fPending / fFixedStep);
     Write(pPawn, mDrawn);
-    bHeld = true;
 }
 
 // startNewPhysics re-enters these inside a step. Only the outermost call accumulates.
-//
-// Cutscene pick velocity for frame it measure: min( distance / dt, speed ). Fixed step run it a
-// thirtieth instead, eight times far at 240 fps, so pawn overshoot mark and come back each step.
-// Camera aim off pawn location, so it read as shake. Script own move here, give frame back.
+// Cutscene picks velocity as min( distance / dt, speed ). A 1/30 step overshoots the mark and comes
+// back each step, camera aims off pawn location, reads as shake. Script owns the move, give it back.
 static bool Passthrough(void* pPawn, float fDelta)
 {
     return bStepping || bNoControl || !pPawn || !(fDelta > 0.0f) || !pIsHumanControlled(pPawn);
