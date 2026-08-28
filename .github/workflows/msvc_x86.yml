@@ -1,0 +1,93 @@
+name: GitHub Actions Build
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - '**/*.txt'
+    branches:
+      - '**'
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - '**/*.txt'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Create a release"
+        type: choice
+        required: false
+        default: 'false'
+        options:
+          - 'true'
+          - 'false'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Add msbuild to PATH
+      uses: microsoft/setup-msbuild@main
+
+    - name: Read release number
+      id: release
+      run: |
+        $match = Select-String -Path premake5.lua -Pattern 'local nRelease\s*=\s*(\d+)'
+        if (-not $match) { throw 'nRelease not found in premake5.lua' }
+        Add-Content -Path $env:GITHUB_OUTPUT -Value "number=$($match.Matches[0].Groups[1].Value)"
+
+    - name: Configure build
+      run: ./premake5 vs2026 --with-version=${{ steps.release.outputs.number }}
+
+    - name: Build
+      run: |
+        msbuild -m build/XIIIMongooseFix.slnx /property:Configuration=Release /property:Platform=Win32
+
+    - name: Download Ultimate ASI Loader x86
+      uses: robinraju/release-downloader@v1.13
+      with:
+        repository: "ThirteenAG/Ultimate-ASI-Loader"
+        tag: "Win32-latest"
+        fileName: "dinput8-Win32.zip"
+
+    - name: Unpack dependencies
+      run: |
+          7z x dinput8-Win32.zip -odata/system/ -y
+          del dinput8-Win32.zip
+          del data\system\dinput8-Win32.SHA512
+
+    - name: Pack binaries
+      run: |
+        ./release.bat
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        archive: false
+        path: XIIIMongooseFix.zip
+
+    - name: Upload Release
+      if: |
+        github.event.inputs.release == 'true' &&
+        github.ref_name == 'main' &&
+        (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      uses: ncipollo/release-action@main
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        allowUpdates: false
+        name: XIIIMongooseFix V${{ steps.release.outputs.number }}
+        bodyFile: "release.md"
+        tag: V${{ steps.release.outputs.number }}
+        artifacts: XIIIMongooseFix.zip
