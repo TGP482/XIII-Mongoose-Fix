@@ -8,6 +8,7 @@ import logging;
 import display;
 import aniso;
 import msaa;
+import dx9;
 import internalres;
 import fov;
 import maxfps;

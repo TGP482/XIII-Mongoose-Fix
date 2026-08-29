@@ -68,11 +68,18 @@ workspace "XIIIMongooseFix"
    defines { "rsc_VersionW=L\"" .. szVersion .. "\"" }
 
    defines { "_CRT_SECURE_NO_WARNINGS" }
+   -- d3d8to9 keeps its own log file; the fix has one.
+   defines { "D3D8TO9NOLOG" }
 
    includedirs { "source" }
    includedirs { "source/includes" }
-   files { "source/*.h", "source/*.hpp", "source/*.cpp", "source/*.hxx", "source/*.ixx" }
+   files { "source/**.h", "source/**.hpp", "source/**.cpp", "source/**.hxx", "source/**.ixx" }
    files { "source/resources/Versioninfo.rc" }
+
+   files { "source/d3d8to9/MemoryModule/MemoryModule.c" }
+   -- The two redistributables are megabytes of hex; listing them only slows the IDE down.
+   removefiles { "source/d3d8to9/*_data_*.h" }
+   links { "d3d9" }
 
    includedirs { "external/hooking" }
    includedirs { "external/injector/include" }

@@ -25,6 +25,7 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 - **Max Frame Rate** - Caps the game's frame rate, either at your monitor's refresh rate automatically or at a value you pick, bypassing the game's 60FPS lock.
 
 ### Graphics
+- **DirectX Version** - Runs the game's renderer through DirectX 9 via d3d8to9 or the stock DirectX 8 path which the game ships with.
 - **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures instead of using the game's defaults.
 - **MSAA** - Enables multisample antialiasing at 2, 4 or 8 samples.
 
@@ -54,3 +55,4 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 
 ### Credits
 - [ThirteenAG](https://github.com/ThirteenAG) - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader)
+- [crosire](https://github.com/crosire) - [d3d8to9](https://github.com/crosire/d3d8to9)

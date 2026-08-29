@@ -15,6 +15,7 @@ export enum Pref
     PREF_RESOLUTIONY,
     PREF_VSYNC,
     PREF_MAXFRAMERATE,
+    PREF_DIRECTXVERSION,
     PREF_ANISOTROPICFILTERING,
     PREF_MSAA,
     PREF_INTERNALRESX,
@@ -60,6 +61,9 @@ public:
 
         // 0 unlocks. Anything else is paced by the fix itself; the engine's own wait is bypassed.
         mPrefs[PREF_MAXFRAMERATE] = std::clamp(iniReader.ReadInteger("Display", "MaxFrameRate", 0), 0, 9999);
+
+        // (0) Direct3D 8, (1) Direct3D 9.
+        mPrefs[PREF_DIRECTXVERSION] = std::clamp(iniReader.ReadInteger("Graphics", "DirectXVersion", 0), 0, 1);
 
         mPrefs[PREF_ANISOTROPICFILTERING] = std::clamp(iniReader.ReadInteger("Graphics", "AnisotropicFiltering", 16), 0, 16);
 
