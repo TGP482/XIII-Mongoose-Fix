@@ -7,12 +7,13 @@ export module internalres;
 import common;
 import settings;
 import logging;
+import dx9;
 
 // Exclusive fullscreen only takes a back buffer that is a real display mode, so the internal size
 // cannot live in the swap chain. SetRes runs untouched at the output size and caches the device
-// render target and depth in two of its own fields; the renderer binds from those two every frame,
-// so swapping them for a target of our own moves the whole frame with no hook at all. A fullscreen
-// textured quad scales it back into the real back buffer just before the game presents.
+// render target and depth in two of its own fields. The renderer binds from those two every frame,
+// so swapping them for our own target moves the whole frame with no hook. A fullscreen textured
+// quad scales it back into the real back buffer just before the game presents.
 //
 // UD3DRenderDevice, D3DDrv.dll:
 //   +0x658 SizeX  +0x65C SizeY   present parameters, and what the effect buffers size themselves to
@@ -33,7 +34,9 @@ static constexpr auto nOffsetBoundDepth = 0x1490;
 static constexpr auto nReleaseSlot = 2;
 static constexpr auto nAddRefSlot = 1;
 static constexpr auto nCreateTextureSlot = 20;
+static constexpr auto nCreateRenderTargetSlot = 25;
 static constexpr auto nCreateDepthStencilSurfaceSlot = 26;
+static constexpr auto nCopyRectsSlot = 28;
 static constexpr auto nSetRenderTargetSlot = 31;
 static constexpr auto nBeginSceneSlot = 34;
 static constexpr auto nEndSceneSlot = 35;
@@ -128,11 +131,18 @@ static void ReleaseCom(void*& pObject)
 static std::atomic<int> nInternalResX = 0;
 static std::atomic<int> nInternalResY = 0;
 static std::atomic<int> nScalingFilter = 1;
+static std::atomic<int> nMSAASamples = 0;
 
 static void* pDevice = nullptr;
 static void* pTexture = nullptr;
 static void* pTargetSurface = nullptr;
 static void* pTargetDepth = nullptr;
+
+// Direct3D 9 only, which resolves it into the texture the scaling pass samples.
+static void* pMSTarget = nullptr;
+
+// What the renderer draws into: the multisampled surface when there is one.
+static void* BoundTarget() { return pMSTarget ? pMSTarget : pTargetSurface; }
 
 // Borrowed: the game holds the reference and Releases it through the field.
 static void* pOriginalTarget = nullptr;
@@ -156,8 +166,8 @@ static void WarnOnce(std::string_view sReason)
         LogWarn("InternalRes: {}, scaling is off", sReason);
 }
 
-// Puts the render device back exactly as SetRes left it and drops everything we made. Target and
-// depth are D3DPOOL_DEFAULT, so none of it may still be alive at the next Reset.
+// Puts the render device back as SetRes left it and drops everything we made. Target and depth are
+// D3DPOOL_DEFAULT, so none of it may be alive at the next Reset.
 static void Teardown()
 {
     if (pStampedRenderDevice)
@@ -178,11 +188,11 @@ static void Teardown()
         }
     }
 
-    // Drop the reference the game would have Released through the field, now it holds neither.
+    // Drop the reference the game would have Released through the field, it holds neither now.
     if (std::exchange(bInstalled, false))
     {
-        if (pTargetSurface)
-            Call<nReleaseSlot, uint32_t>(pTargetSurface);
+        if (BoundTarget())
+            Call<nReleaseSlot, uint32_t>(BoundTarget());
         if (pTargetDepth)
             Call<nReleaseSlot, uint32_t>(pTargetDepth);
     }
@@ -192,6 +202,7 @@ static void Teardown()
 
     nStateBlock = 0;
     ReleaseCom(pTargetDepth);
+    ReleaseCom(pMSTarget);
     ReleaseCom(pTargetSurface);
     ReleaseCom(pTexture);
 
@@ -238,7 +249,7 @@ static void DrawQuad(void* pDev)
     Call<nSetPixelShaderSlot, HRESULT>(pDev, 0u);
     Call<nSetIndicesSlot, HRESULT>(pDev, static_cast<void*>(nullptr), 0u);
 
-    // The internal frame keeps its own shape inside the output; the rest is bars.
+    // Internal frame keeps its own shape inside the output, the rest is bars.
     auto nFitX = 0, nFitY = 0, nFitW = nOutputX, nFitH = nOutputY;
     if (static_cast<int64_t>(nRenderX) * nOutputY != static_cast<int64_t>(nOutputX) * nRenderY)
     {
@@ -254,7 +265,7 @@ static void DrawQuad(void* pDev)
         Call<nClearSlot, HRESULT>(pDev, 0u, static_cast<const void*>(nullptr), D3DCLEAR_TARGET, 0xFF000000u, 1.0f, 0u);
     }
 
-    // The half texel the rasteriser puts between a pixel centre and a texel centre.
+    // The half texel the rasteriser puts between pixel centre and texel centre.
     const auto fLeft = static_cast<float>(nFitX) - 0.5f;
     const auto fTop = static_cast<float>(nFitY) - 0.5f;
     const auto fRight = static_cast<float>(nFitX + nFitW) - 0.5f;
@@ -271,17 +282,17 @@ static void DrawQuad(void* pDev)
     Call<nDrawPrimitiveUPSlot, HRESULT>(pDev, D3DPT_TRIANGLESTRIP, 2u,
         static_cast<const void*>(aVertices), static_cast<uint32_t>(sizeof(ScreenVertex)));
 
-    // The next frame renders into what is left bound here.
+    // Next frame renders into what is left bound here.
     Call<nSetTextureSlot, HRESULT>(pDev, 0u, static_cast<void*>(nullptr));
 }
 
 // Called by display inside its UD3DRenderDevice::Lock hook, before the original runs.
 //
 // Lock builds the D3D viewport rect from whichever UViewport it is handed, not from the render
-// device, and asserts if that rect is larger than the bound target. SetRes only ever hands over
-// one viewport: XIII opens four, and a borderless window resize puts the output size back into
-// one of them without a SetRes. Either way a viewport reaches Lock still holding the output size
-// while the smaller target is bound, so the size goes on whichever one is actually drawn.
+// device, and asserts if that rect is larger than the bound target. SetRes hands over one viewport,
+// XIII opens four, and a borderless resize puts the output size back into one of them with no
+// SetRes. Either way a viewport reaches Lock holding the output size while the smaller target is
+// bound, so the size goes on whichever one is drawn.
 export void StampInternalResViewport(uint8_t* pViewport)
 {
     if (!bActive || !pViewport)
@@ -299,21 +310,28 @@ export void PresentInternalRes(uint8_t* pRenderDevice)
 
     Call<nCaptureStateBlockSlot, HRESULT>(pDevice, nStateBlock);
 
-    if (Ok(Call<nSetRenderTargetSlot, HRESULT>(pDevice, pOriginalTarget, pOriginalDepth))
-        && Ok(Call<nBeginSceneSlot, HRESULT>(pDevice)))
+    if (Ok(Call<nSetRenderTargetSlot, HRESULT>(pDevice, pOriginalTarget, pOriginalDepth)))
     {
-        DrawQuad(pDevice);
-        Call<nEndSceneSlot, HRESULT>(pDevice);
+        // Unbound first, the resolve reads the surface the frame was drawn into.
+        if (pMSTarget)
+            Call<nCopyRectsSlot, HRESULT>(pDevice, pMSTarget, static_cast<const RECT*>(nullptr), 0u,
+                pTargetSurface, static_cast<const POINT*>(nullptr));
+
+        if (Ok(Call<nBeginSceneSlot, HRESULT>(pDevice)))
+        {
+            DrawQuad(pDevice);
+            Call<nEndSceneSlot, HRESULT>(pDevice);
+        }
     }
 
     Call<nApplyStateBlockSlot, HRESULT>(pDevice, nStateBlock);
 
     // Lock sets the viewport to the internal size before the render interface binds anything, so
-    // the bigger target must stay current between frames or SetViewport fails.
-    Call<nSetRenderTargetSlot, HRESULT>(pDevice, pTargetSurface, pTargetDepth);
+    // the bigger target stays current between frames or SetViewport fails.
+    Call<nSetRenderTargetSlot, HRESULT>(pDevice, BoundTarget(), pTargetDepth);
 }
 
-// Called by display just before the original SetRes: everything held here is D3DPOOL_DEFAULT and
+// Called by display just before the original SetRes. Everything held here is D3DPOOL_DEFAULT and
 // SetRes resets the device.
 export void ReleaseInternalRes()
 {
@@ -328,7 +346,7 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
     // A recreate took the old surfaces with it, nothing left to release.
     if (pNewDevice != pDevice)
     {
-        pTexture = pTargetSurface = pTargetDepth = nullptr;
+        pTexture = pTargetSurface = pTargetDepth = pMSTarget = nullptr;
         pOriginalTarget = pOriginalDepth = nullptr;
         pStampedRenderDevice = nullptr;
         pStampedViewport = nullptr;
@@ -346,13 +364,17 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
     const auto nWantX = nInternalResX.load();
     const auto nWantY = nInternalResY.load();
 
+    // Direct3D 8 cannot resolve a multisampled surface, so there msaa keeps it on the back buffer.
+    // Under Direct3D 9 it belongs to the target rendered here.
+    const auto nWantSamples = IsDX9Active() ? nMSAASamples.load() : 0;
+
     nOutputX = *reinterpret_cast<int*>(pRenderDevice + nOffsetSizeX);
     nOutputY = *reinterpret_cast<int*>(pRenderDevice + nOffsetSizeY);
 
-    // 0 on either axis is off; matching the output is off by another name.
+    // 0 on either axis is off, matching the output is off by another name.
     if (nWantX < 1 || nWantY < 1 || nOutputX < 1 || nOutputY < 1)
         return;
-    if (nWantX == nOutputX && nWantY == nOutputY)
+    if (nWantX == nOutputX && nWantY == nOutputY && nWantSamples < 2)
         return;
 
     auto pBackBuffer = *reinterpret_cast<void**>(pRenderDevice + nOffsetBoundTarget);
@@ -369,15 +391,15 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
         return;
     }
 
-    // A multisampled surface cannot be sampled as a texture and D3D8 has nothing to resolve it
-    // with, so the two features cannot both be on.
+    // A multisampled surface cannot be sampled as a texture and D3D8 cannot resolve one, so the
+    // two features cannot both be on.
     if (back.nMultiSampleType != D3DMULTISAMPLE_NONE)
     {
         WarnOnce("the back buffer is multisampled, which rules out a scaling pass");
         return;
     }
 
-    // The game depth format, so the substitute matches what it renders against.
+    // Game depth format, so the substitute matches what it renders against.
     auto nDepthFormat = D3DFMT_D24S8;
     auto pGameDepth = *reinterpret_cast<void**>(pRenderDevice + nOffsetBoundDepth);
     if (pGameDepth)
@@ -395,16 +417,58 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
         return;
     }
 
-    if (Failed(Call<nGetSurfaceLevelSlot, HRESULT>(pTexture, 0u, &pTargetSurface)) || !pTargetSurface
-        || Failed(Call<nCreateDepthStencilSurfaceSlot, HRESULT>(pDevice, static_cast<uint32_t>(nWantX), static_cast<uint32_t>(nWantY),
-            nDepthFormat, D3DMULTISAMPLE_NONE, &pTargetDepth)) || !pTargetDepth)
+    if (Failed(Call<nGetSurfaceLevelSlot, HRESULT>(pTexture, 0u, &pTargetSurface)) || !pTargetSurface)
     {
-        LogWarn("InternalRes: the driver refused a {}x{} depth stencil, scaling is off", nWantX, nWantY);
+        LogWarn("InternalRes: the {}x{} render target gave up no surface, scaling is off", nWantX, nWantY);
         Teardown();
         return;
     }
 
-    // The renderer caches its own state, so the scaling pass hands back everything it touches.
+    // Highest count the driver takes for colour and depth alike, the depth matching the colour it
+    // is rendered against.
+    auto nSamples = D3DMULTISAMPLE_NONE;
+    for (auto n : { 8u, 4u, 2u })
+    {
+        if (static_cast<int>(n) > nWantSamples)
+            continue;
+
+        if (Failed(Call<nCreateRenderTargetSlot, HRESULT>(pDevice, static_cast<uint32_t>(nWantX), static_cast<uint32_t>(nWantY),
+                back.nFormat, n, 0, &pMSTarget)) || !pMSTarget)
+        {
+            pMSTarget = nullptr;
+            continue;
+        }
+
+        if (Ok(Call<nCreateDepthStencilSurfaceSlot, HRESULT>(pDevice, static_cast<uint32_t>(nWantX), static_cast<uint32_t>(nWantY),
+                nDepthFormat, n, &pTargetDepth)) && pTargetDepth)
+        {
+            nSamples = n;
+            break;
+        }
+
+        pTargetDepth = nullptr;
+        ReleaseCom(pMSTarget);
+    }
+
+    if (nSamples == D3DMULTISAMPLE_NONE)
+    {
+        if (nWantSamples >= 2)
+            LogWarn("MSAA: {}x asked for, the device supports none of it at {}x{}", nWantSamples, nWantX, nWantY);
+
+        if (Failed(Call<nCreateDepthStencilSurfaceSlot, HRESULT>(pDevice, static_cast<uint32_t>(nWantX), static_cast<uint32_t>(nWantY),
+                nDepthFormat, D3DMULTISAMPLE_NONE, &pTargetDepth)) || !pTargetDepth)
+        {
+            LogWarn("InternalRes: the driver refused a {}x{} depth stencil, scaling is off", nWantX, nWantY);
+            Teardown();
+            return;
+        }
+    }
+    else if (nSamples < static_cast<uint32_t>(nWantSamples))
+    {
+        LogWarn("MSAA: {}x asked for, {}x is the highest the device supports at {}x{}", nWantSamples, nSamples, nWantX, nWantY);
+    }
+
+    // Renderer caches its own state, so the scaling pass hands back everything it touches.
     if (Failed(Call<nCreateStateBlockSlot, HRESULT>(pDevice, D3DSBT_ALL, &nStateBlock)) || !nStateBlock)
     {
         nStateBlock = 0;
@@ -421,17 +485,17 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
     pOriginalDepth = pGameDepth;
 
     // The game Releases whatever these fields hold at the top of the next SetRes.
-    Call<nAddRefSlot, uint32_t>(pTargetSurface);
+    Call<nAddRefSlot, uint32_t>(BoundTarget());
     Call<nAddRefSlot, uint32_t>(pTargetDepth);
 
-    *reinterpret_cast<void**>(pRenderDevice + nOffsetBoundTarget) = pTargetSurface;
+    *reinterpret_cast<void**>(pRenderDevice + nOffsetBoundTarget) = BoundTarget();
     *reinterpret_cast<void**>(pRenderDevice + nOffsetBoundDepth) = pTargetDepth;
     bInstalled = true;
 
     *reinterpret_cast<int*>(pRenderDevice + nOffsetSizeX) = nWantX;
     *reinterpret_cast<int*>(pRenderDevice + nOffsetSizeY) = nWantY;
 
-    // The render interface sizes the bound target from the viewport, not the device.
+    // Render interface sizes the bound target from the viewport, not the device.
     if (pViewport)
     {
         *reinterpret_cast<int*>(pViewport + nOffsetViewportSizeX) = nWantX;
@@ -439,10 +503,13 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
     }
     bActive = true;
 
-    Call<nSetRenderTargetSlot, HRESULT>(pDevice, pTargetSurface, pTargetDepth);
+    Call<nSetRenderTargetSlot, HRESULT>(pDevice, BoundTarget(), pTargetDepth);
 
     LogInfo("InternalRes: {}x{} scaled to {}x{}, {} filter", nWantX, nWantY, nOutputX, nOutputY,
         nScalingFilter.load() == 0 ? "point" : "bilinear");
+
+    if (nSamples >= 2)
+        LogInfo("MSAA: {}x on the internal target", nSamples);
 }
 
 class InternalRes
@@ -456,6 +523,7 @@ public:
             BindInt(nInternalResX, PREF_INTERNALRESX);
             BindInt(nInternalResY, PREF_INTERNALRESY);
             BindInt(nScalingFilter, PREF_SCALINGFILTER);
+            BindInt(nMSAASamples, PREF_MSAA);
         };
 
         MongooseFix::onShutdownEvent() += []() { Teardown(); };

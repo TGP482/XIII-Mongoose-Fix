@@ -8,24 +8,28 @@ import common;
 import settings;
 import logging;
 
-// d3d8to9 by Patrick Mours, BSD 3-Clause, compiled into the asi from source/d3d8to9. Its entry
-// point stands in for the one D3DDrv.dll imports from d3d8.dll.
+// d3d8to9 by Patrick Mours, BSD 3-Clause, built into the asi from source/d3d8to9. Its entry point
+// stands in for the d3d8.dll one D3DDrv.dll imports.
 extern "C" void* __stdcall Direct3DCreate8(UINT nSDKVersion);
 
-// Installed ahead of msaa, which hooks the same export and has to sit outside this one to see the
-// object that comes back.
+// Ahead of msaa: msaa hooks the same export and must sit outside this one to see what comes back.
 static constexpr auto nInitPriority = 50;
 
 static SafetyHookInline shCreate{};
+static bool bActive = false;
+
+// internalres asks before multisampling its own render target.
+export bool IsDX9Active() { return bActive; }
 
 static void* __stdcall Create(UINT nSDKVersion)
 {
     auto pResult = Direct3DCreate8(nSDKVersion);
 
-    // No Direct3D 9 device to be had, so hand back the stock one rather than no renderer at all.
+    // No Direct3D 9 to be had, hand back the stock object rather than no renderer at all.
     if (!pResult)
     {
         LogWarn("Direct3D 9: d3d8to9 returned nothing, falling back to Direct3D 8");
+        bActive = false;
         return shCreate.stdcall<void*>(nSDKVersion);
     }
 
@@ -54,6 +58,7 @@ static void Init()
         return;
     }
 
+    bActive = true;
     LogInfo("Direct3D 9: on");
 }
 
@@ -62,7 +67,7 @@ class DX9
 public:
     DX9()
     {
-        // The device is made once, so this is startup only; an ini change lands on the next launch.
+        // Device made once, startup only. Ini change lands next launch.
         MongooseFix::onD3DDrvInitEvent().add([]() { Init(); }, nInitPriority);
     }
 } DX9;

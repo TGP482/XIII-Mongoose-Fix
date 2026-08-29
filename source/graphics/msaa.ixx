@@ -7,13 +7,14 @@ export module msaa;
 import common;
 import settings;
 import logging;
+import dx9;
 
-// The renderer never asks for a multisampled back buffer, so the request is written into the
-// present parameters on their way into CreateDevice and Reset.
+// Renderer never asks for a multisampled back buffer, so the request is written into the present
+// parameters on their way into CreateDevice and Reset.
 //
 // XIII reads the back buffer back every frame in UD3DRenderDevice::ReadPixels, and D3D8 refuses
-// LockRect on a multisampled surface. So that readback comes from the front buffer whenever MSAA is
-// on, and MSAA stays off entirely unless ReadPixels can be hooked.
+// LockRect on a multisampled surface. That readback comes from the front buffer while MSAA is on,
+// and MSAA stays off unless ReadPixels hooks.
 
 // IDirect3D8: CheckDeviceMultiSampleType 11, CreateDevice 15.
 static constexpr auto nCheckMultiSampleSlot = 11;
@@ -35,7 +36,7 @@ static constexpr auto D3DSWAPEFFECT_DISCARD = 1;
 static constexpr auto D3DFMT_A8R8G8B8 = 21;
 static constexpr auto D3DLOCK_READONLY = 0x10;
 
-// UD3DRenderDevice, from D3DDrv.dll; the same fields display.ixx documents.
+// UD3DRenderDevice, D3DDrv.dll. Fields documented in display.ixx.
 static constexpr auto nOffsetSizeX = 0x658;
 static constexpr auto nOffsetSizeY = 0x65C;
 static constexpr auto nOffsetDevice = 0x66C;
@@ -44,7 +45,7 @@ static constexpr auto nOffsetDevice = 0x66C;
 static constexpr auto nOffsetViewportSizeX = 0x88;
 static constexpr auto nOffsetViewportSizeY = 0x8C;
 
-// D3D8 numbers its sample counts, so the type is the sample count.
+// D3D8 numbers its sample counts, so type is sample count.
 static constexpr int nSampleLevels[] = { 8, 4, 2 };
 
 struct D3DPRESENT_PARAMETERS8
@@ -121,8 +122,9 @@ static bool IsMultiSampleSupported(uint32_t nFormat, int32_t bWindowed, uint32_t
     return SUCCEEDED(pCheck(pD3D, nAdapter, nDeviceType, nFormat, bWindowed, nType));
 }
 
-// A multisampled surface cannot be a texture and cannot be resolved under D3D8, so it cannot
-// coexist with a downscaled internal resolution.
+// D3D8 cannot texture from or resolve a multisampled surface, so MSAA cannot coexist with an
+// internal resolution. Direct3D 9 can resolve, so there internalres multisamples its own target and
+// the back buffer stays single sampled.
 static int WantedSamples()
 {
     if (!bReadPixelsHooked || bFailed.load())
@@ -130,6 +132,9 @@ static int WantedSamples()
 
     if (MongooseFixSettings.GetInt(PREF_INTERNALRESX) != 0 || MongooseFixSettings.GetInt(PREF_INTERNALRESY) != 0)
     {
+        if (IsDX9Active())
+            return 0;
+
         static std::once_flag flag;
         std::call_once(flag, []() { LogWarn("MSAA: supersampling and MSAA cannot be combined on Direct3D 8, MSAA is off"); });
         return 0;
@@ -162,7 +167,7 @@ static void ApplyMSAA(D3DPRESENT_PARAMETERS8* pParams)
         if (nType > nWanted)
             continue;
 
-        // The auto depth stencil is made at the back buffer sample count, so it needs it too.
+        // Auto depth stencil is made at the back buffer sample count, so it needs it too.
         if (!IsMultiSampleSupported(pParams->nBackBufferFormat, pParams->bWindowed, nType))
             continue;
         if (pParams->bEnableAutoDepthStencil && !IsMultiSampleSupported(pParams->nAutoDepthStencilFormat, pParams->bWindowed, nType))
@@ -189,8 +194,8 @@ static void ApplyMSAA(D3DPRESENT_PARAMETERS8* pParams)
         LogInfo("MSAA: {}x", nGot);
 }
 
-// GetFrontBuffer always hands back the whole screen in X8R8G8B8, whose dword layout is UE2 FColor,
-// so the window's slice copies straight into the caller's buffer.
+// GetFrontBuffer hands back the whole screen in X8R8G8B8, dword layout of UE2 FColor, so the
+// window's slice copies straight into the caller's buffer.
 static bool CaptureFrontBuffer(uint8_t* pRenderDev, uint8_t* pViewport, uint32_t* pDest)
 {
     if (!pRenderDev || !pViewport || !pDest)
@@ -231,7 +236,7 @@ static bool CaptureFrontBuffer(uint8_t* pRenderDev, uint8_t* pViewport, uint32_t
     if (FAILED(pGetFront(pDevice, pFrontSurface)))
         return false;
 
-    // Fullscreen is the whole surface; windowed is the client area in screen coordinates.
+    // Fullscreen is the whole surface, windowed the client area in screen coordinates.
     RECT src = { 0, 0, static_cast<LONG>(mode.nWidth), static_cast<LONG>(mode.nHeight) };
     if (bWindowedMode)
     {
@@ -274,12 +279,12 @@ static void __fastcall ReadPixels(uint8_t* pThis, void*, uint8_t* pViewport, uin
         return;
     }
 
-    // Present calls this with both arguments null every frame: stock locks the back buffer and
-    // copies nothing, so with MSAA on there is nothing to do but skip the lock that would fail.
+    // Present calls this with both arguments null every frame. Stock locks the back buffer and
+    // copies nothing, so with MSAA on only the lock that would fail is skipped.
     if (!pViewport || !pPixels)
         return;
 
-    // Never fall through to the original while MSAA is on, locking that surface is the crash.
+    // Never fall through to the original while MSAA is on, that lock is the crash.
     if (!CaptureFrontBuffer(pThis, pViewport, pPixels) && !bFailed.exchange(true))
         LogWarn("MSAA: the front buffer readback failed, MSAA goes off at the next device reset");
 }
@@ -334,8 +339,8 @@ static void* __stdcall Direct3DCreate8(uint32_t nSDKVersion)
 
 static void InitD3D8()
 {
-    // The exact decorated name, never a fuzzy match: the mangling proves this really is
-    // void ReadPixels(FColor*) and that hooking it as a one argument thiscall is right.
+    // Exact decorated name, never a fuzzy match. The mangling proves this is
+    // void ReadPixels(FColor*) and that a one argument thiscall hook is right.
     auto hD3DDrv = GetModuleHandleW(L"D3DDrv.dll");
     auto pReadPixels = hD3DDrv ? GetProcAddress(hD3DDrv, "?ReadPixels@UD3DRenderDevice@@UAEXPAVUViewport@@PAVFColor@@@Z") : nullptr;
 
@@ -370,7 +375,7 @@ static void InitD3D8()
 
     bReadPixelsHooked = true;
 
-    // A change is picked up by the next reset the game does anyway; nothing here forces one.
+    // Next reset the game does picks a change up, nothing here forces one.
     BindInt(nMSAASamples, PREF_MSAA);
 }
 
