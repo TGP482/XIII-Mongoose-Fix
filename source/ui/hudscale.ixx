@@ -499,7 +499,6 @@ static float InterfaceScale(uint8_t* pCanvas)
     const auto fClipX = *reinterpret_cast<float*>(pCanvas + nOffsetClipX);
     const auto fClipY = *reinterpret_cast<float*>(pCanvas + nOffsetClipY);
 
-    // Parenthesised: Windows.h is included without NOMINMAX, so min is a macro.
     return (std::min)(fClipX / fAuthoredWidth, fClipY / fAuthoredHeight);
 }
 

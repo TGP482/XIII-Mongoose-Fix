@@ -159,7 +159,6 @@ static void ApplyLiveSites()
     if (nWidth <= 0 || nHeight <= 0)
         return;
 
-    // Parenthesised, Windows.h comes in without NOMINMAX so min is a macro.
     const auto fScale = (std::min)(nWidth / fAuthoredWidth, nHeight / fAuthoredHeight);
 
     std::lock_guard g(mtxSites);

@@ -1641,7 +1641,6 @@ export bool MongooseMenuPadKey(int nKey, int nAction)
 
 static int __fastcall KeyEvent(void* pMaster, void*, int nKey, int nAction, float fDelta, void* pViewport)
 {
-    // The canvas hangs off the viewport.
     static constexpr auto nOffsetViewportCanvas = 0x68;
 
     auto pCanvas = pViewport ? Read<void*>(pViewport, nOffsetViewportCanvas) : nullptr;

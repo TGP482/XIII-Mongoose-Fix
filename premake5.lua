@@ -40,7 +40,7 @@ workspace "XIIIMongooseFix"
       revision = math.min(tonumber(t[4]), 65535)
    end
 
-   -- -- Local builds show DEV, CI releases use the actual version
+   -- Local builds show DEV; a CI build takes its number from --with-version.
    local nRelease = 1
    local szVersion = _OPTIONS["with-version"] and ("V" .. major) or ("V" .. nRelease .. " DEV")
 
@@ -109,7 +109,6 @@ workspace "XIIIMongooseFix"
       -- Parentheses keep both SET commands inside the FOR loop body.
       "for %%S in (\"$(TargetPath)\") do (set \"MFSRC=%%~fS\" & set \"MFNAME=%%~nxS\")",
       "set \"MFDST=!MFDIR!\\!MFNAME!\"",
-      -- No game install found, skip
       "if not exist \"!MFDIR!\\\" goto :MFDONE",
       "if /I \"!MFSRC!\"==\"!MFDST!\" goto :MFDONE",
       -- Fail loudly: the game holds the asi open, so a silent copy failure leaves the old build in place.
@@ -121,7 +120,6 @@ workspace "XIIIMongooseFix"
    function setpaths (gamepath, exepath, pluginspath)
       pluginspath = pluginspath or "plugins/"
       if (gamepath) then
-         -- Keep deployment variables local to this build step
          local cmdcopy = {
             "setlocal EnableExtensions EnableDelayedExpansion",
             "set \"MFDIR=" .. (gamepath .. pluginspath):gsub("([^/\\])$", "%1/") .. "\"",
