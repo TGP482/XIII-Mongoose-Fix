@@ -53,6 +53,19 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 - Fixed mouse movement breaking with high polling rates and removed the deadzone.
 - Fixed an issue where mouse sensitivity changed with the field of view.
 - Fixed HUD elements, menus, blur effects and comic panels not scaling properly with resolution.
+<div align="center">
+  <table>
+    <tr>
+      <td width="50%"><img style="width:100%" src="https://github.com/user-attachments/assets/4e8984c0-b385-4b58-8639-b6228873c292""></td>
+      <td width="50%"><img style="width:100%" src="https://github.com/user-attachments/assets/96e14acc-ce94-448b-a049-a2e92488b3ff"></td>
+    </tr>
+    <tr>
+      <td align="center">Before</td>
+      <td align="center">After</td>
+    </tr>
+  </table>
+</div>
+
 - Fixed the cutscene camera never turning onto its focus target above 162 fps, leaving the shot pointed at whatever angle it started on.
 - Fixed getting stuck when squeezing through narrow gaps at high frame rates.
 - Fixed an issue with FMVs playing silently.
