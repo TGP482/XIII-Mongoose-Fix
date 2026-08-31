@@ -364,10 +364,6 @@ struct Setting
 };
 
 static constexpr Choice aDisplayMode[]{ { 0, "Windowed" }, { 1, "Borderless" }, { 2, "Fullscreen" } };
-static constexpr Choice aWidth[]{ { 0, "Desktop" }, { 640, "640" }, { 800, "800" }, { 1024, "1024" },
-    { 1280, "1280" }, { 1366, "1366" }, { 1600, "1600" }, { 1920, "1920" }, { 2560, "2560" }, { 3840, "3840" } };
-static constexpr Choice aHeight[]{ { 0, "Desktop" }, { 480, "480" }, { 600, "600" }, { 720, "720" },
-    { 768, "768" }, { 900, "900" }, { 1080, "1080" }, { 1440, "1440" }, { 2160, "2160" } };
 static constexpr Choice aScalingFilter[]{ { 0, "Point" }, { 1, "Bilinear" } };
 static constexpr Choice aMaxFrameRate[]{ { 0, "Unlocked" }, { 1, "Monitor" }, { 30, "30" }, { 60, "60" },
     { 72, "72" }, { 90, "90" }, { 120, "120" }, { 144, "144" }, { 165, "165" }, { 240, "240" }, { 360, "360" } };
@@ -382,8 +378,6 @@ static constexpr Choice aLayout[]{ { 0, "Classic Halo" }, { 1, "Goofy Halo" }, {
 static Setting aSettings[]
 {
     { "Display", "DisplayMode", "Display Mode", Kind::Choice, CHOICE(aDisplayMode), 0, 0, 0, 0, 1, 1 },
-    { "Display", "ResolutionX", "Window Width", Kind::Choice, CHOICE(aWidth), 0, 0, 0, 0, 0, 0 },
-    { "Display", "ResolutionY", "Window Height", Kind::Choice, CHOICE(aHeight), 0, 0, 0, 0, 0, 0 },
     // A percentage of the window: the ini keeps both axes, the page keeps the percentage.
     { "Display", "InternalResolutionX", "Render Resolution", Kind::Scale, nullptr, 0, 0, 0, 0, 0, 100, 100 },
     { "Display", "ScalingFilter", "Scaling Filter", Kind::Choice, CHOICE(aScalingFilter), 0, 0, 0, 0, 1, 1 },
