@@ -6,7 +6,9 @@ The latest version of [XIII: Mongoose Fix](https://github.com/TGP482/XIII-Mongoo
 
 ### Game Setup
 - After downloading XIII: Mongoose Fix, extract the contents to your XIII directory and overwrite all existing files when prompted.
-- You can adjust the mod settings inside `XIIIMongooseFix.ini` located in the `system\plugins` folder, whilst the game is running.
+- You can adjust the mod settings inside the in-game options menu whilst the game is running or alternatively inside XIIIMongooseFix.ini located in the system\Plugins folder.
+<img width="3840" height="2160" alt="203196~1" src="https://github.com/user-attachments/assets/612ab810-cfb0-4f6a-91a7-d2f814a2bb96" />
+
 
 > [!NOTE]
 > Linux / Steam Deck will need the following command to launch the game:
