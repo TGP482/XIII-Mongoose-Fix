@@ -9,13 +9,14 @@ export module controller;
 import common;
 import settings;
 import logging;
+import mongoosemenu;
 import rawmouse;
 
-// Xbox pad support half survives in the PC binaries. Dead as shipped, restored here:
-//   Rumble: UForceFeedbackManager::Instance exported, never written on PC. Points at ours now.
-//   Input: UseJoystick=False, and DirectInput misses triggers and d-pad. XInput instead, through
-//          UInput::DirectAxis and CauseInputEvent, the doors the stock joystick block used.
-//   Bindings: XIIIMenuControlsWindow's generic block ships commented out. Most of the pad unbound.
+// Xbox pad support half survives in the PC binaries, dead as shipped:
+//   Rumble: UForceFeedbackManager::Instance is exported but never written. Points at ours now.
+//   Input: UseJoystick=False, and DirectInput misses triggers and d-pad. XInput instead, fed through
+//          UInput::DirectAxis and CauseInputEvent.
+//   Bindings: XIIIMenuControlsWindow's generic block ships commented out, leaving the pad unbound.
 
 // UForceFeedbackManager vtable slots the script bindings call.
 static constexpr auto nSlotStartEffect = 0x74 / 4;
@@ -23,8 +24,8 @@ static constexpr auto nSlotEnableForceFeedback = 0x78 / 4;
 static constexpr auto nSlotIsForceFeedbackEnable = 0x7C / 4;
 static constexpr auto nSlotCount = 32;
 
-// Effect table is in compiled XIIIPlayerController. Every observed effect sends duration 0, so only
-// the two motor strengths are used.
+// Effect table lives in compiled XIIIPlayerController. Every observed effect sends duration 0, so
+// only the two motor strengths matter.
 //
 // ponytail: no envelope, one fixed window. Revisit if an effect needs to sustain.
 static constexpr auto nRumbleMilliseconds = 250;
@@ -94,8 +95,7 @@ static PadState ReadPad();
 static void PadThread();
 
 // All XInput on this thread: empty slots cost milliseconds and the first call initialises XInput.
-// Library load and thread start wait for first use; a module load callback would run both under the
-// loader lock.
+// Deferred to first use so the load and the thread start miss the loader lock.
 static void StartPadThread()
 {
     static std::once_flag flag;
@@ -168,8 +168,7 @@ static int __fastcall IsForceFeedbackEnable(void*, void*, int)
     return bRumbleEnabled ? 1 : 0;
 }
 
-// Unreached slots stay null. A crash beats a stub with the wrong argument count corrupting the
-// stack silently.
+// Unreached slots stay null: a crash beats a stub with the wrong argument count wrecking the stack.
 static void* apVtable[nSlotCount]{};
 static void* pVtable = apVtable;
 
@@ -183,8 +182,8 @@ static constexpr auto nInputActionPress = 1;
 static constexpr auto nInputActionRelease = 3;
 static constexpr auto nInputActionAxis = 4;
 
-// Xbox button order, from the game's script: XIIIMPBotInteraction PF_XBOX puts the d-pad on Joy9 to
-// Joy12, XIIIMenuPressStart treats Joy13 as start. Shoulders take Black and White's slots.
+// Xbox button order from the game's script: XIIIMPBotInteraction PF_XBOX puts the d-pad on Joy9 to
+// Joy12, XIIIMenuPressStart takes Joy13 as start. Shoulders sit in Black and White's slots.
 static constexpr WORD aButtons[] =
 {
     XINPUT_GAMEPAD_A,                // Joy1
@@ -213,20 +212,18 @@ static constexpr auto nTriggerThreshold = 30;
 // Radial, so diagonals are not clipped square, rescaled so the live range still reaches full.
 static constexpr auto fPadDeadzone = 0.5f;
 
-// Measured: an axis binding multiplies the fed value by 20, and SPEED= and DEADZONE= in the string
-// change nothing. XIII's strings say SpeedBase=1.0, a token the parser never reads, so a full stick
-// arrived as 1 against the keyboard's fInputRange of 1150. Hence the stock PC pad axes did nothing.
-// Scale goes in on the way in instead.
+// Measured: an axis binding multiplies the fed value by 20; SPEED=, DEADZONE= and XIII's
+// SpeedBase=1.0 are tokens the parser never reads. A full stick reached 1 against the keyboard's
+// fInputRange of 1150, so stock PC pad axes did nothing. Scaled on the way in instead.
 //
 // ponytail: 20 confirmed on all four axes. Recheck if a build reads differently.
 static constexpr auto fEngineAxisScale = 20.0f;
 
-// DealWithPlayerInputEvent scales pad axes by DeltaTime * 60 first, so the pad was tuned for 60 fps.
-// Walk/run compares scaled aBaseY against 0.875 * fInputRange, missed by 4x at 240 fps: always
-// walking. Divided back out so full deflection runs at any frame rate.
+// DealWithPlayerInputEvent scales pad axes by DeltaTime * 60, tuning the pad for 60 fps: walk/run
+// compares scaled aBaseY against 0.875 * fInputRange, missed by 4x at 240 fps. Divided back out.
 //
-// ponytail: movement only. Look rides the same factor and stays frame rate dependent; it feels right
-// as is and rescaling changes the tuning.
+// ponytail: movement only. Look rides the same factor and stays frame rate dependent; rescaling
+// changes the tuning.
 static float fFrameFactor = 1.0f;
 static float fFrameDelta = 0.0f;
 static float fInputRange = 1150.0f;
@@ -247,24 +244,26 @@ static constexpr auto nViewportInputOffset = 0x6C;
 
 static uint16_t nHeldButtons = 0;
 
-// No setting: the pad turns itself on the first time it reports anything, and the byte patch goes in
-// at that moment, so a keyboard-only machine runs an untouched game.
+// No setting: the pad turns itself on the first time it reports anything and the byte patch goes in
+// then, so a keyboard-only machine runs an untouched game.
 static bool bPadActive = false;
 
-// Every keyboard, mouse and pad event reaches UWindowsViewport::CauseInputEvent, so one hook there
-// tells the sources apart by key code. Releases ignored: the key sweep issues them for keys nobody
-// pressed.
+// Every keyboard, mouse and pad event reaches UWindowsViewport::CauseInputEvent, so one hook tells
+// the sources apart by key code. Releases ignored: the key sweep issues them for unpressed keys.
 static SafetyHookInline shCauseInputEvent{};
 
-// The cursor branch in UGUIController::NativePostRender, jumped over. Not a NOP over the draw call
-// itself: the epilogue pops EBX, ESI and EDI before restoring ESP, so the abandoned arguments came
-// back as registers and the interaction loop above walked off a garbage array.
+// The cursor branch in UGUIController::NativePostRender, jumped over. Not a NOP over the draw call:
+// the epilogue pops EBX, ESI and EDI before restoring ESP, so abandoned arguments come back as
+// registers and the interaction loop walks off a garbage array.
 static std::unique_ptr<raw_mem> patchHideCursor;
 
 static void SetPadInput(bool bPad)
 {
     if (bPadInput.exchange(bPad) != bPad && patchHideCursor)
         patchHideCursor->Set(bPad);
+
+    // The settings page draws its own cursor, so it needs the same answer this patch acts on.
+    MongooseMenuNotePadInput(bPad);
 }
 
 // Only buttons: pad axes go in through DirectAxis, never here.
@@ -276,12 +275,12 @@ static int __fastcall CauseInputEvent(void* pThis, void*, int nKey, int nAction,
     return shCauseInputEvent.fastcall<int>(pThis, nullptr, nKey, nAction, fDelta);
 }
 
-// UpdateInput ends by sweeping keys 0 to 255, asking GetKeyState about anything unhandled that
-// frame. 200 and up are Joy and axis codes, not virtual keys, so the sweep answers "up" and releases
-// our buttons a frame after each press. Stock marked them handled; the sweep stops at 200 instead.
+// UpdateInput ends by sweeping keys 0 to 255 through GetKeyState. 200 and up are Joy and axis codes,
+// not virtual keys, so the sweep answers "up" and releases our buttons a frame after each press.
+// Stock marked them handled; the sweep stops at 200 instead.
 static std::unique_ptr<raw_mem> patchKeySweepRange;
 
-// Bindings wait for a player: XIII package unloaded during startup, so ConfigType misses, and
+// Bindings wait for a player: the XIII package is unloaded at startup so ConfigType misses, and
 // touching the input system under the splash hangs the boot.
 static void* pLastViewport = nullptr;
 
@@ -301,7 +300,7 @@ static constexpr const char* aButtonBindings[] =
     "SET Input Joy16 Reload",
 };
 
-// Classic Halo, Goofy Halo, Classic XIII, Goofy XIII, the menu's order. Goofy swaps turn and
+// Classic Halo, Goofy Halo, Classic XIII, Goofy XIII, the menu's order; Goofy swaps turn and
 // strafe. Byte for byte what the in-game menu rewrites, so the menu keeps working.
 struct Layout
 {
@@ -454,10 +453,9 @@ static void FeedPad(void* pViewport)
     nHeldButtons = state.nButtons;
 }
 
-// Menus test raw keyboard codes: Enter, Backspace, Escape, arrows. A pad key means nothing to them.
-// Every key enters the GUI through UGUIController::NativeKeyEvent, and its return says whether the
-// GUI took it, which doubles as "is a menu open". So: offer the keyboard equivalent first, and if
-// nothing consumes it pass the real pad key through to gameplay.
+// Menus test raw keyboard codes (Enter, Backspace, Escape, arrows), never pad keys. All keys enter
+// through UGUIController::NativeKeyEvent, whose return doubles as "is a menu open": offer the
+// keyboard equivalent first, pass the real pad key through if nothing consumes it.
 static SafetyHookInline shNativeKeyEvent{};
 
 static uint8_t MenuKey(uint8_t nKey)
@@ -479,6 +477,9 @@ static int __fastcall NativeKeyEvent(void* pThis, void*, uint8_t* pKey, uint8_t*
 {
     if (auto nKey = MenuKey(*pKey))
     {
+        if (MongooseMenuPadKey(nKey, *pState))
+            return 1;
+
         if (shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nKey, pState, fDelta))
             return 1;
     }
@@ -486,8 +487,8 @@ static int __fastcall NativeKeyEvent(void* pThis, void*, uint8_t* pKey, uint8_t*
     return shNativeKeyEvent.fastcall<int>(pThis, nullptr, pKey, pState, fDelta);
 }
 
-// Menus read raw keyboard codes, so the left stick nudges them with arrow presses. Sent to the
-// original NativeKeyEvent, which consumes nothing while no menu is up, so gameplay never sees them.
+// Left stick nudges menus with arrow presses through the original NativeKeyEvent, which consumes
+// nothing while no menu is up, so gameplay never sees them.
 static SafetyHookInline shNativeTick{};
 
 // UGUIController::MenuStack.Num, and MouseX, followed by MouseY, LastMouseX, LastMouseY.
@@ -510,7 +511,7 @@ static void __fastcall NativeTick(void* pThis, void*, float fDeltaTime)
         || !*reinterpret_cast<int*>(static_cast<uint8_t*>(pThis) + nMenuStackNumOffset))
         return;
 
-    // Skipping the branch skips the LastMouse write inside it, and UGUIVertList::Draw would then see
+    // Skipping the branch skips the LastMouse write inside it, so UGUIVertList::Draw would see
     // HasMouseMoved every frame and drag the selection back under the cursor.
     auto pMouse = reinterpret_cast<int*>(static_cast<uint8_t*>(pThis) + nMouseXOffset);
     pMouse[2] = pMouse[0];
@@ -533,11 +534,33 @@ static void __fastcall NativeTick(void* pThis, void*, float fDeltaTime)
     else if (state.fLeftX < -fNavThreshold)
         nKey = 0x25;
 
+    // A held d-pad repeats the same way, but its first step already went out as a button press
+    // through NativeKeyEvent, so it starts on the long delay.
+    auto bHeldButton = false;
+
+    if (!nKey)
+    {
+        // PadState::nButtons is a bit per aButtons index, not the XInput mask, so the d-pad is
+        // bits 8 to 11.
+        static constexpr auto nDPadUpBit = 8;
+
+        if (state.nButtons & (1 << (nDPadUpBit + 0)))
+            nKey = 0x26;
+        else if (state.nButtons & (1 << (nDPadUpBit + 1)))
+            nKey = 0x28;
+        else if (state.nButtons & (1 << (nDPadUpBit + 2)))
+            nKey = 0x25;
+        else if (state.nButtons & (1 << (nDPadUpBit + 3)))
+            nKey = 0x27;
+
+        bHeldButton = nKey != 0;
+    }
+
     if (nKey != nNavKey)
     {
         nNavKey = nKey;
-        fNavTimer = 0.0f;
-        bNavRepeating = false;
+        fNavTimer = bHeldButton ? fNavDelayFirst : 0.0f;
+        bNavRepeating = bHeldButton;
     }
 
     if (!nKey)
@@ -551,8 +574,11 @@ static void __fastcall NativeTick(void* pThis, void*, float fDeltaTime)
     uint8_t nPress = nInputActionPress;
     uint8_t nRelease = nInputActionRelease;
 
-    shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nPress, fDeltaTime);
-    shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nRelease, fDeltaTime);
+    if (!MongooseMenuPadKey(nMenuKey, nPress))
+    {
+        shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nPress, fDeltaTime);
+        shNativeKeyEvent.fastcall<int>(pThis, nullptr, &nMenuKey, &nRelease, fDeltaTime);
+    }
 
     fNavTimer = bNavRepeating ? fNavDelayRepeat : fNavDelayFirst;
     bNavRepeating = true;
@@ -571,16 +597,16 @@ static constexpr auto nLookSpeedOffset = 0x380;
 // UPlayerInput::fInputRange.
 static constexpr auto nInputRangeOffset = 0x5C;
 
-// Aim acceleration: aTurn takes ViewTurnAcc + ViewTurnBoost, aLookUp takes ViewUpAcc, accumulators
-// that ramp the longer a direction is held. Pinned to unity, no boost, so the stick maps straight to
-// turn rate. Every frame, not once: the engine rewrites them during the pass.
+// Aim acceleration: aTurn takes ViewTurnAcc + ViewTurnBoost, aLookUp ViewUpAcc, accumulators that
+// ramp while a direction is held. Pinned to unity, no boost, so the stick maps straight to turn
+// rate. Every frame: the engine rewrites them during the pass.
 static constexpr auto nViewTurnAccOffset = 0x64;
 static constexpr auto nViewTurnBoostOffset = 0x68;
 static constexpr auto nViewUpAccOffset = 0x6C;
 
 // The engine's FOV factor, DesiredFOV * 0.01111, multiplies mouse and pad alike, and the mouse
-// module replaces that load with its own, dragging pad look onto MouseSensitivity and resolution.
-// Divided back out, stock factor substituted, so pad look answers to Sensitivity alone.
+// module's replacement load drags pad look onto MouseSensitivity and resolution. Divided back out,
+// stock factor substituted, so pad look answers to Sensitivity alone.
 static constexpr auto fFovFactor = 0.01111f;
 
 static float PadLookFactor()
@@ -592,7 +618,7 @@ static float PadLookFactor()
     return fPadSensitivity * fStockFieldOfView * fFovFactor / fEngineScale;
 }
 
-// Sensitivity applied around the original, not after: aTurn and aLookUp are pure pad values only
+// Sensitivity applied around the original, not after: aTurn and aLookUp hold pure pad values only
 // until this call folds the mouse in.
 static void __fastcall DealWithPlayerInputEvent(void* pThis, void*, float fDeltaTime)
 {
@@ -614,10 +640,14 @@ static void __fastcall DealWithPlayerInputEvent(void* pThis, void*, float fDelta
 
     if (bPadActive)
     {
-        if (pLastViewport)
+        // Rebound when the layout moves: the binds are console commands, and the ini watcher's
+        // thread is no place to run them.
+        static auto nAppliedLayout = -1;
+
+        if (pLastViewport && nAppliedLayout != MongooseFixSettings.GetInt(PREF_PADLAYOUT))
         {
-            static std::once_flag flagBindings;
-            std::call_once(flagBindings, []() { ApplyBindings(pLastViewport); });
+            nAppliedLayout = MongooseFixSettings.GetInt(PREF_PADLAYOUT);
+            ApplyBindings(pLastViewport);
         }
 
         Input(nViewTurnAccOffset) = 1.0f;
@@ -680,7 +710,7 @@ static void InitGUI()
         LogWarn("Controller: GUI tick not found, no stick menu navigation");
 
     // MOV EAX,[ESI+0x2c] / TEST byte [EAX+0x38],1 / JNZ, the bShowWindowsMouse test. The jump becomes
-    // an unconditional one to the epilogue, the stack state the untaken branch already reaches.
+    // unconditional to the epilogue, the stack state the untaken branch already reaches.
     auto patternCursor = module_pattern(L"GUI.dll", "8B 46 2C F6 40 38 01 0F 85 DE 01 00 00");
     if (patternCursor.empty())
     {

@@ -10,10 +10,10 @@ import logging;
 import dx9;
 
 // Exclusive fullscreen only takes a back buffer that is a real display mode, so the internal size
-// cannot live in the swap chain. SetRes runs untouched at the output size and caches the device
-// render target and depth in two of its own fields. The renderer binds from those two every frame,
-// so swapping them for our own target moves the whole frame with no hook. A fullscreen textured
-// quad scales it back into the real back buffer just before the game presents.
+// cannot live in the swap chain. SetRes caches the device render target and depth in two of its own
+// fields and the renderer binds from those every frame, so swapping them for our own target moves
+// the whole frame with no hook. A fullscreen textured quad scales it back into the real back buffer
+// before the game presents.
 //
 // UD3DRenderDevice, D3DDrv.dll:
 //   +0x658 SizeX  +0x65C SizeY   present parameters, and what the effect buffers size themselves to
@@ -141,7 +141,6 @@ static void* pTargetDepth = nullptr;
 // Direct3D 9 only, which resolves it into the texture the scaling pass samples.
 static void* pMSTarget = nullptr;
 
-// What the renderer draws into: the multisampled surface when there is one.
 static void* BoundTarget() { return pMSTarget ? pMSTarget : pTargetSurface; }
 
 // Borrowed: the game holds the reference and Releases it through the field.
@@ -159,17 +158,20 @@ static bool bInstalled = false;
 static bool bActive = false;
 static bool bWarned = false;
 
-// One line per reason, however many resets it survives.
 static void WarnOnce(std::string_view sReason)
 {
     if (!std::exchange(bWarned, true))
         LogWarn("InternalRes: {}, scaling is off", sReason);
 }
 
-// Puts the render device back as SetRes left it and drops everything we made. Target and depth are
-// D3DPOOL_DEFAULT, so none of it may be alive at the next Reset.
+// Target and depth are D3DPOOL_DEFAULT, so none of it may be alive at the next Reset.
 static void Teardown()
 {
+    // Restoring the fields is not enough: our surface stays bound across the reset, so the next
+    // frame's viewport would be the output size against a smaller target.
+    if (pDevice && pOriginalTarget)
+        Call<nSetRenderTargetSlot, HRESULT>(pDevice, pOriginalTarget, pOriginalDepth);
+
     if (pStampedRenderDevice)
     {
         if (bInstalled)
@@ -286,13 +288,13 @@ static void DrawQuad(void* pDev)
     Call<nSetTextureSlot, HRESULT>(pDev, 0u, static_cast<void*>(nullptr));
 }
 
-// Called by display inside its UD3DRenderDevice::Lock hook, before the original runs.
-//
-// Lock builds the D3D viewport rect from whichever UViewport it is handed, not from the render
-// device, and asserts if that rect is larger than the bound target. SetRes hands over one viewport,
-// XIII opens four, and a borderless resize puts the output size back into one of them with no
-// SetRes. Either way a viewport reaches Lock holding the output size while the smaller target is
-// bound, so the size goes on whichever one is drawn.
+export bool IsInternalResActive() { return bActive; }
+
+// Called by display inside its UD3DRenderDevice::Lock hook, before the original runs. Lock builds
+// the viewport rect from whichever UViewport it is handed, not from the render device, and asserts
+// if that rect is larger than the bound target. SetRes hands over one viewport, XIII opens four,
+// and a borderless resize puts the output size back into one of them with no SetRes, so the
+// internal size goes on whichever viewport reaches Lock.
 export void StampInternalResViewport(uint8_t* pViewport)
 {
     if (!bActive || !pViewport)
@@ -327,11 +329,11 @@ export void PresentInternalRes(uint8_t* pRenderDevice)
     Call<nApplyStateBlockSlot, HRESULT>(pDevice, nStateBlock);
 
     // Lock sets the viewport to the internal size before the render interface binds anything, so
-    // the bigger target stays current between frames or SetViewport fails.
+    // the bigger target must stay current between frames or SetViewport fails.
     Call<nSetRenderTargetSlot, HRESULT>(pDevice, BoundTarget(), pTargetDepth);
 }
 
-// Called by display just before the original SetRes. Everything held here is D3DPOOL_DEFAULT and
+// Called by display just before the original SetRes: everything held here is D3DPOOL_DEFAULT and
 // SetRes resets the device.
 export void ReleaseInternalRes()
 {
@@ -364,8 +366,8 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
     const auto nWantX = nInternalResX.load();
     const auto nWantY = nInternalResY.load();
 
-    // Direct3D 8 cannot resolve a multisampled surface, so there msaa keeps it on the back buffer.
-    // Under Direct3D 9 it belongs to the target rendered here.
+    // D3D8 cannot resolve a multisampled surface, so there MSAA stays on the back buffer. Under
+    // D3D9 it belongs to the target rendered here.
     const auto nWantSamples = IsDX9Active() ? nMSAASamples.load() : 0;
 
     nOutputX = *reinterpret_cast<int*>(pRenderDevice + nOffsetSizeX);
@@ -391,8 +393,7 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
         return;
     }
 
-    // A multisampled surface cannot be sampled as a texture and D3D8 cannot resolve one, so the
-    // two features cannot both be on.
+    // A multisampled surface cannot be sampled as a texture, and D3D8 cannot resolve one.
     if (back.nMultiSampleType != D3DMULTISAMPLE_NONE)
     {
         WarnOnce("the back buffer is multisampled, which rules out a scaling pass");
@@ -424,8 +425,8 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
         return;
     }
 
-    // Highest count the driver takes for colour and depth alike, the depth matching the colour it
-    // is rendered against.
+    // Highest count the driver takes for colour and depth alike, depth matching the colour it is
+    // rendered against.
     auto nSamples = D3DMULTISAMPLE_NONE;
     for (auto n : { 8u, 4u, 2u })
     {
@@ -468,7 +469,7 @@ export void ApplyInternalRes(uint8_t* pRenderDevice, uint8_t* pViewport)
         LogWarn("MSAA: {}x asked for, {}x is the highest the device supports at {}x{}", nWantSamples, nSamples, nWantX, nWantY);
     }
 
-    // Renderer caches its own state, so the scaling pass hands back everything it touches.
+    // Renderer caches its own state, so the scaling pass must hand back everything it touches.
     if (Failed(Call<nCreateStateBlockSlot, HRESULT>(pDevice, D3DSBT_ALL, &nStateBlock)) || !nStateBlock)
     {
         nStateBlock = 0;

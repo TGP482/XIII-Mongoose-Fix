@@ -33,8 +33,8 @@ export enum Pref
     COUNT,
 };
 
-// The script FOV base. Weapon zoom levels and the viewmodel offset are authored against it, so the
-// FOV module scales from it.
+// Script FOV base. Weapon zoom levels and the viewmodel offset are authored against it, so the FOV
+// module scales from it.
 export inline constexpr auto fStockFieldOfView = 85.0f;
 
 export class CSettings
@@ -47,6 +47,13 @@ public:
     static inline void ReadIniSettings()
     {
         CIniReader iniReader("");
+
+        // A failed open yields all defaults. The menu replaces the ini by rename and the watcher
+        // fires around it, so a read landing in that window would reset every setting to stock.
+        std::error_code ec;
+        if (std::filesystem::exists(iniReader.GetIniPath(), ec)
+            && iniReader.ReadInteger("Display", "DisplayMode", -1) == -1)
+            return;
 
         // (0) windowed, (1) borderless, (2) fullscreen.
         mPrefs[PREF_DISPLAYMODE] = std::clamp(iniReader.ReadInteger("Display", "DisplayMode", 2), 0, 2);
@@ -71,12 +78,12 @@ public:
         auto nMSAA = std::clamp(iniReader.ReadInteger("Graphics", "MSAA", 0), 0, 8);
         mPrefs[PREF_MSAA] = nMSAA >= 8 ? 8 : nMSAA >= 4 ? 4 : nMSAA >= 2 ? 2 : 0;
 
-        // Either axis off turns the pair off; a partial size has no meaning.
         auto nInternalX = iniReader.ReadInteger("Display", "InternalResolutionX", 0);
         auto nInternalY = iniReader.ReadInteger("Display", "InternalResolutionY", 0);
         const auto bInternal = nInternalX > 0 && nInternalY > 0;
-        mPrefs[PREF_INTERNALRESX] = bInternal ? std::clamp(nInternalX, 320, 16384) : 0;
-        mPrefs[PREF_INTERNALRESY] = bInternal ? std::clamp(nInternalY, 240, 16384) : 0;
+        // 8192, not the 16384 the ini used to document: past that the card dies rather than slows.
+        mPrefs[PREF_INTERNALRESX] = bInternal ? std::clamp(nInternalX, 320, 8192) : 0;
+        mPrefs[PREF_INTERNALRESY] = bInternal ? std::clamp(nInternalY, 240, 8192) : 0;
         mPrefs[PREF_SCALINGFILTER] = std::clamp(iniReader.ReadInteger("Display", "ScalingFilter", 1), 0, 1);
 
         mPrefs[PREF_MOUSESMOOTHING] = std::clamp(iniReader.ReadInteger("Gameplay", "MouseSmoothing", 0), 0, 1);
@@ -96,7 +103,6 @@ public:
 
         mPrefs[PREF_ALLOWCHEATS] = std::clamp(iniReader.ReadInteger("General", "AllowCheats", 0), 0, 1);
 
-        // Installed once, on the first read; what makes every setting live.
         static std::once_flag flag;
         std::call_once(flag, [&]()
         {
@@ -106,7 +112,11 @@ public:
             static filewatch::FileWatch<std::string> watch(iniReader.GetIniPath().string(),
                 [](const std::string&, const filewatch::Event change_type)
                 {
-                    if (change_type != filewatch::Event::modified)
+                    // The menu replaces the file by rename, so the change arrives as a rename
+                    // rather than a write.
+                    if (change_type != filewatch::Event::modified
+                        && change_type != filewatch::Event::added
+                        && change_type != filewatch::Event::renamed_new)
                         return;
 
                     ReadIniSettings();
@@ -141,7 +151,6 @@ void BindFloat(T& target, Pref pref)
     ApplyAndWatch([&target, pref]() { target = MongooseFixSettings.GetFloat(pref); });
 }
 
-// A byte patch written while the setting is on, put back while it is off.
 export void BindPatch(raw_mem& patch, Pref pref)
 {
     ApplyAndWatch([&patch, pref]() { patch.Set(MongooseFixSettings.GetInt(pref) != 0); });

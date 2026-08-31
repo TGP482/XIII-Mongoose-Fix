@@ -7,18 +7,17 @@ export module hudscale;
 import common;
 import logging;
 import menuscale;
+import mongoosemenu;
 
-// The HUD draws in raw screen pixels. For the length of the pass the canvas reports the 480 unit
-// tall screen the HUD was drawn against, and every quad on the way out is multiplied back up. Text
-// comes with it: a glyph is a quad through the same function and the pen advances in the same units.
+// For the HUD pass the canvas reports the 480 unit tall screen the HUD was drawn against and every
+// quad out is multiplied back up; glyphs ride along, being quads through the same function. Works
+// because every HUD tile and glyph reaches FCanvasUtil::DrawTile (exported; first four arguments
+// are corners in absolute screen pixels), AHUD::eventPostRender is exported and called from one
+// place, and UCanvas::Update runs once a frame ahead of the pass.
 //
-// This works because every HUD tile and glyph reaches FCanvasUtil::DrawTile (exported; the first
-// four arguments are corners in absolute screen pixels), AHUD::eventPostRender is exported and
-// called from one place, and UCanvas::Update runs once a frame ahead of the pass.
-//
-// Menus need the real ClipX, since script hit tests against the real pixel mouse, so only menu text
-// is scaled, in two places that have to agree or centred labels drift: the quads a string emits,
-// about the string start, and both outputs of the per character metrics primitive behind TextSize.
+// Menus need the real ClipX, script hit testing against the real pixel mouse, so only menu text is
+// scaled, in two places that must agree or centred labels drift: the quads a string emits, about
+// the string start, and both outputs of the per character metrics primitive behind TextSize.
 //
 // UCanvas: +0x34 OrgX +0x38 OrgY +0x3C ClipX +0x40 ClipY +0x64 SizeX +0x68 SizeY +0x74 Viewport
 // Text is point sampled, wrong when magnified, so smoothing goes back on for scaled strings.
@@ -50,9 +49,8 @@ static SafetyHookInline shSetOrigin{};
 
 // execDrawTile and execDrawTileClipped pass CurX+OrgX; DrawTileStretched, DrawTileScaled,
 // DrawTileBound, DrawTileScaleBound, DrawTileJustified, DrawIcon and DrawPattern pass CurX and
-// never read OrgX. Harmless while the origin is zero, but the interface now centres itself with it
-// (480,0 at 3840 wide), so the text moves and the panel behind it does not. All seven take
-// (UMaterial*, X, Y, ...), so one mid hook at entry adds the origin to the stack floats.
+// never read OrgX, which only shows now the interface centres itself (origin 480,0 at 3840 wide).
+// All seven take (UMaterial*, X, Y, ...), so one mid hook at entry adds the origin.
 static constexpr auto nOffsetArgX = 0x08;   // __thiscall: return address, UMaterial*, X, Y
 static constexpr auto nOffsetArgY = 0x0C;
 
@@ -71,9 +69,9 @@ static std::atomic<float> fHudScale = 1.0f;
 static std::atomic<bool> bGuiPass = false;
 static std::atomic<float> fGuiScale = 1.0f;
 
-// The interface box is 640x480 times one scale, and neither script use of ClipX, the ratios and
-// the right edge of anything page wide, wants the screen. The real values are kept for the HUD
-// pass, which lays out against the screen even inside this one.
+// The interface box is 640x480 times one scale, and neither script use of ClipX, ratios and the
+// right edge of page wide draws, wants the screen. The real values are kept for the HUD pass, which
+// lays out against the screen even inside this one.
 static std::atomic<bool> bGuiClamped = false;
 static std::atomic<float> fRealClipX = 0.0f;
 static std::atomic<float> fRealClipY = 0.0f;
@@ -88,8 +86,7 @@ static bool bBandDrawn = false;
 static float fBandHeight = 0.0f;
 
 // Thread local: the loading thread animates while the main thread is still drawing, and a shared
-// flag would scale the menu too. Above one only inside the pass, so the flag and the scale are one
-// value.
+// flag would scale the menu too. Above one only inside the pass, so flag and scale are one value.
 static thread_local float fLoadingScale = 1.0f;
 
 static void DrawTile(SafetyHookContext& ctx)
@@ -129,10 +126,9 @@ static void DrawTile(SafetyHookContext& ctx)
     }
 }
 
-// A camera view is a portal: script places it in HUD units and the backing quad scales with
-// everything else through DrawTile, but the region the scene renders into comes from these four
-// stack ints and does not, leaving a 320x240 picture in the corner. Read after the last parameter
-// comes off the script stack, before either use.
+// The backing quad scales through DrawTile, but the region the scene renders into comes from these
+// four stack ints and does not, leaving a 320x240 picture in the corner. Hooked after the last
+// parameter comes off the script stack, before either use.
 static void DrawPortal(SafetyHookContext& ctx)
 {
     if (!bHudPass.load())
@@ -147,8 +143,8 @@ static void DrawPortal(SafetyHookContext& ctx)
     }
 }
 
-// UCanvas::DrawFrame lays the comic border out as triangles, the one HUD primitive that is not a
-// tile, so it would stay at the virtual canvas size. The corners are the first six stack floats.
+// UCanvas::DrawFrame draws the comic border as triangles, the one HUD primitive that is not a
+// tile. Corners are the first six stack floats.
 static void DrawTriangle(SafetyHookContext& ctx)
 {
     if (!bHudPass.load())
@@ -161,9 +157,9 @@ static void DrawTriangle(SafetyHookContext& ctx)
         pCorners[i] *= fScale;
 }
 
-// A box outline is line strokes, one pixel wide however large the box, with no width to set, so
-// the stroke is laid down repeatedly, stepped along its perpendicular, in one batch. HUD
-// coordinates are virtual and move as well as thicken; interface ones are already real.
+// A stroke is one pixel wide whatever the box size and has no width to set, so it is repeated
+// along its perpendicular. HUD coordinates are virtual and move as well as thicken, interface ones
+// are already real.
 static void __fastcall DrawLine(uint8_t* pThis, void*, float fX1, float fY1, float fX2, float fY2,
     uint32_t nColour, int nStyle)
 {
@@ -201,8 +197,7 @@ static void __fastcall DrawLine(uint8_t* pThis, void*, float fX1, float fY1, flo
 }
 
 // WorldToScreen projects through the viewport, not the canvas, so it answers real pixels whatever
-// the canvas reports. Script draws target boxes with that and the HUD pass would scale them again,
-// so it is handed pass units.
+// the canvas reports and the HUD pass would scale script's target boxes again. Handed pass units.
 static SafetyHookInline shWorldToScreen{};
 
 static void __fastcall WorldToScreen(uint8_t* pThis, void*, void* pStack, float* pResult)
@@ -226,10 +221,9 @@ static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pR
         return;
 
     // Message box geometry is in pixels, but like every window it sets the origin from WinLeft as a
-    // fraction of the page: 990 gives 2,851,680. Harmless until the seven draws start honouring the
-    // origin. Panel, backdrop, controls and captions are all absolute screen pixels, so zero is
-    // right; anything else moves the ones that read the origin and strands the captions, which
-    // do not.
+    // fraction of the page: 990 gives 2,851,680. Its panel, backdrop, controls and captions are all
+    // absolute screen pixels, so zero is right and anything else strands the captions, which ignore
+    // the origin.
     auto pOrgX = reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
     auto pOrgY = reinterpret_cast<float*>(pCanvas + nOffsetOrgY);
     const auto fLimit = (std::max)(fRealClipX.load(), *reinterpret_cast<float*>(pCanvas + nOffsetClipX));
@@ -244,9 +238,8 @@ static void __fastcall SetOrigin(uint8_t* pCanvas, void*, void* pStack, void* pR
 // Set for one execDrawMsgboxBackground; the first quad says which caller it is.
 static bool bMsgboxPass = false;
 
-// The framework's white backdrop under a message box is the rectangle the panel then draws over,
-// but it goes down before the box sets its origin, so it takes the page origin and lands a
-// pillarbox right. It is the same rectangle every frame, so the panel identifies it.
+// The framework's white backdrop goes down before the box sets its origin, so it takes the page one
+// and lands a pillarbox right. Same rectangle every frame, so the panel identifies it.
 static float aMsgboxPanel[4]{};
 static int nMsgboxQuad = 0;
 static bool bMsgboxSelfPlaced = false;
@@ -289,8 +282,8 @@ static void AddOrigin(SafetyHookContext& ctx)
 
         nMsgboxQuad++;
 
-        // The geometry is in screen coordinates now and menuscale centres the box there, because
-        // the GUI natives that draw its caption and buttons read WinLeft straight, so no offset.
+        // menuscale already centres the box in screen coordinates, because the GUI natives drawing
+        // its caption and buttons read WinLeft straight, so no offset.
         if (bMsgboxSelfPlaced)
             return;
     }
@@ -342,7 +335,7 @@ static void SmoothText(uint8_t* pCanvas)
     reinterpret_cast<void(__thiscall*)(void*, int)>(pVtable[nSmoothingSlot])(pRenderInterface, 1);
 }
 
-// Returns how far the pen moved. X and Y are the pen start before the origin is added.
+// X and Y are the pen start, before the origin is added.
 static int __cdecl DrawString(uint8_t* pCanvas, void* pFont, int nX, int nY, const char* szText,
     uint32_t nColour, int bClip, int bParseAmpersand)
 {
@@ -354,13 +347,15 @@ static int __cdecl DrawString(uint8_t* pCanvas, void* pFont, int nX, int nY, con
     if (!bGuiPass.load())
         return shDrawString.ccall<int>(pCanvas, pFont, nX, nY, szText, nColour, bClip, bParseAmpersand);
 
+    MongooseMenuNoteFont(pFont);
+
     const auto fOrgX = *reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
     const auto fOrgY = *reinterpret_cast<float*>(pCanvas + nOffsetOrgY);
 
     const auto fBox = fAuthoredWidth * fGuiScale.load();
     const auto fPillarX = bGuiClamped.load() ? (fRealClipX.load() - fBox) * 0.5f : 0.0f;
 
-    if (bBandDrawn && fPillarX > 0.0f && nY + fOrgY < fBandHeight)
+    if (bBandDrawn && !MongooseMenuOwnsText() && fPillarX > 0.0f && nY + fOrgY < fBandHeight)
         nX -= static_cast<int>(fPillarX);
 
     fStringX = nX + fOrgX;
@@ -374,8 +369,8 @@ static int __cdecl DrawString(uint8_t* pCanvas, void* pFont, int nX, int nY, con
     return static_cast<int>(nAdvance * fGuiScale.load());
 }
 
-// Tail of the per character metrics primitive behind every text measurement script can ask for.
-// The width is still reachable by its stack slot, the height by EBP.
+// Tail of the per character metrics primitive behind every script text measurement. The width is
+// still reachable by its stack slot, the height by EBP.
 static void CharSize(SafetyHookContext& ctx)
 {
     if (!bGuiPass.load())
@@ -389,13 +384,11 @@ static void CharSize(SafetyHookContext& ctx)
     *pHeight = static_cast<int32_t>(*pHeight * fScale);
 }
 
-// execDrawMsgboxBackground lays the pause panel out natively with every dimension a literal, so
-// the frame stays two pixels wide however large the panel: the 2.0 pushed as each border quad's
-// thickness, the 1.0 they inset by to straddle the edge, the 2.0 they lengthen by to close the
-// corners, and the 2.0/4.0 pair the surround bars use.
-//
-// The thickness is a push immediate, written in place. The rest load from float constants Engine.dll
-// shares module wide, so each load operand is repointed at a float of ours.
+// Every pause panel dimension in execDrawMsgboxBackground is a literal, so the frame stays two
+// pixels wide at any size: 2.0 thickness per border quad, 1.0 inset to straddle the edge, 2.0
+// lengthening to close the corners, 2.0/4.0 for the surround bars. The thickness is a push
+// immediate, written in place; the rest load from float constants Engine.dll shares module wide, so
+// each load operand is repointed at a float of ours.
 static constexpr uint8_t aPushFloat2[] = { 0x68, 0x00, 0x00, 0x00, 0x40 };  // PUSH 2.0f
 static constexpr uint8_t nFAdd32 = 0x05;    // FADD dword ptr [imm32], after D8
 static constexpr uint8_t nFSub32 = 0x25;    // FSUB dword ptr [imm32], after D8
@@ -506,18 +499,15 @@ static float InterfaceScale(uint8_t* pCanvas)
     const auto fClipX = *reinterpret_cast<float*>(pCanvas + nOffsetClipX);
     const auto fClipY = *reinterpret_cast<float*>(pCanvas + nOffsetClipY);
 
-    // The scale the menu layout gets, so text grows with its boxes.
     // Parenthesised: Windows.h is included without NOMINMAX, so min is a macro.
     return (std::min)(fClipX / fAuthoredWidth, fClipY / fAuthoredHeight);
 }
 
-// Two menu draws are no part of the 4:3 page, the objectives band and the pause panel's black
-// surround bars, and stopping them at the box leaves a strip of game showing at each end.
-//
-// The canvas cannot name them: every control sets its origin to its own corner and clips to its own
-// size, so a button background also starts where the canvas starts. The screen can: the box sits at
-// a fixed (screen - box)/2 from each edge, so a tile is page wide if it reaches that and is most of
-// a page across, which no background is.
+// The objectives band and the pause panel's black surround bars are no part of the 4:3 page, and
+// stopping them at the box leaves a strip of game showing at each end. The canvas cannot name them,
+// every control setting its origin to its own corner and clipping to its own size, but the screen
+// can: the box sits (screen - box)/2 from each edge, so a tile is page wide if it reaches that and
+// is most of a page across, which no background is.
 static constexpr auto fSpanningFraction = 0.5f;
 static constexpr auto fEdgeSlack = 0.5f;
 
@@ -535,8 +525,17 @@ static void __fastcall CanvasDrawTile(uint8_t* pCanvas, void*, void* pMaterial,
     float fX, float fY, float fXL, float fYL, float fU, float fV, float fUL, float fVL, float fZ,
     FPlane Colour, FPlane Fog)
 {
+    // The settings page owns the pointer while it is up and draws the cursor itself.
+    if (MongooseMenuSuppressTile(pMaterial))
+        return;
+
     const auto Draw = [&](float fLeft, float fWidth)
     {
+        // The interface's cursor goes past here; the settings page redraws the same quad over itself
+        // rather than drawing a cursor of its own.
+        MongooseMenuNoteTile(pMaterial, fLeft, fY, fWidth, fYL, fU, fV, fUL, fVL, fZ,
+            &Colour.X, &Fog.X);
+
         shCanvasDrawTile.thiscall<void>(pCanvas, pMaterial, fLeft, fY, fWidth, fYL,
             fU, fV, fUL, fVL, fZ, Colour, Fog);
     };
@@ -566,8 +565,8 @@ static void __fastcall CanvasDrawTile(uint8_t* pCanvas, void*, void* pMaterial,
     const auto fLeft = bTouchesLeft ? 0.0f : fX;
     const auto fRight = bTouchesRight ? fScreenX : fX + fXL;
 
-    // The full screen backdrop draws the same way, so the band is known by its height: 118 units
-    // of the page, which nothing else is.
+    // The full screen backdrop draws the same way, so the band is known by its height, 118 units of
+    // the page.
     const auto fBand = fAuthoredBandHeight * fGuiScale.load();
 
     if (bTouchesLeft && bTouchesRight && fY <= 0.5f && std::abs(fYL - fBand) <= 2.0f)
@@ -579,11 +578,10 @@ static void __fastcall CanvasDrawTile(uint8_t* pCanvas, void*, void* pMaterial,
     Draw(fLeft, fRight - fLeft);
 }
 
-// Frames around engine drawn controls are nine slices, and DrawTileStretched takes the border size
-// as half the material's USize and VSize, 16 pixels at every resolution for a 32x32 style texture.
-// Script BorderOffsets is never read natively, so scaling it did nothing. Corner size, middle span
-// and texture coordinates all come from that one figure, so there is no number to patch: the slices
-// are emitted here instead, border scaled, source rectangles left alone.
+// DrawTileStretched takes the nine slice border as half the material's USize and VSize, 16 pixels
+// at any resolution for a 32x32 style texture, and corner size, middle span and texture coordinates
+// all derive from it, so there is no number to patch (script BorderOffsets is never read natively).
+// The slices are emitted here instead, border scaled, source rectangles left alone.
 static SafetyHookInline shDrawTileStretched{};
 
 using MaterialSize_t = int(__thiscall*)(void*);
@@ -715,9 +713,8 @@ static void RestoreBox(uint8_t* pCanvas, const CanvasBox& saved)
     WriteBox(pCanvas, saved);
 }
 
-// Rendering a portal sets the canvas up for the camera's own view and leaves it that way, and the
-// scene it renders runs its own HUD pass that ends by clearing the flag. Whatever the HUD had left
-// to draw would then go out unscaled at screen coordinates.
+// Rendering a portal leaves the canvas set up for the camera's view, and the scene runs its own HUD
+// pass that ends by clearing the flag, so the rest of the outer HUD would go out unscaled.
 static SafetyHookInline shDrawPortalExec{};
 
 static void __fastcall DrawPortalExec(uint8_t* pCanvas, void*, void* pStack, void* pResult)
@@ -736,12 +733,10 @@ static void __fastcall DrawPortalExec(uint8_t* pCanvas, void*, void* pStack, voi
     bHudPass = true;
 }
 
-// The loading thread draws to the viewport canvas, laid out against 640x480 like the HUD: 50 pixel
-// sprites, the caption 240 in from the right edge and 65 up from the bottom, font as authored.
-//
-// Nothing shared is written, canvas and viewport included: the thread runs mid load, so anything it
-// changes is read by the engine and kept. Quads are multiplied on the way out; the two screen pixel
-// inputs, the spawn bounds and the caption corner, are divided where they are read.
+// The loading thread draws to the viewport canvas against 640x480 like the HUD: 50 pixel sprites,
+// caption 240 in from the right edge and 65 up from the bottom, font as authored. It runs mid load,
+// so nothing shared is written, canvas and viewport included. Quads are multiplied on the way out;
+// the two screen pixel inputs, spawn bounds and caption corner, are divided where they are read.
 static constexpr auto nOffsetEngineClient = 0x4C;
 static constexpr auto nOffsetClientViewports = 0x2C;
 static constexpr auto nOffsetViewportCanvas = 0x68;
@@ -845,6 +840,10 @@ static void __fastcall GuiPostRender(uint8_t* pMaster, void*, uint8_t* pCanvas)
 
     bGuiPass = true;
     shGuiPostRender.thiscall<void>(pMaster, pCanvas);
+
+    // Inside the pass and the menu box, so the fix's own page is treated like a real one.
+    MongooseMenuDraw(pCanvas);
+
     bGuiPass = false;
 
     RestoreBox(pCanvas, saved);
@@ -897,9 +896,9 @@ static void __fastcall HudPostRender(uint8_t* pHud, void*, uint8_t* pCanvas)
     *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeX) = static_cast<int32_t>(nSizeX / fScale);
     *reinterpret_cast<int32_t*>(pCanvas + nOffsetSizeY) = static_cast<int32_t>(fAuthoredHeight);
 
-    // The HUD sets no origin of its own, so it inherits whatever the interface left behind and
-    // execDrawTile adds it before anything here sees the quad: the loading screen picture is a page
-    // wide tile drawn in this pass, and the menu's centring origin would put it a page right.
+    // The HUD sets no origin, so it inherits the interface's and execDrawTile adds it before
+    // anything here sees the quad: the loading screen picture is a page wide tile in this pass, and
+    // the menu's centring origin would put it a page right.
     auto pOrgX = reinterpret_cast<float*>(pCanvas + nOffsetOrgX);
     auto pOrgY = reinterpret_cast<float*>(pCanvas + nOffsetOrgY);
     const auto fOrgX = *pOrgX;
@@ -926,10 +925,10 @@ static void __fastcall HudPostRender(uint8_t* pHud, void*, uint8_t* pCanvas)
     ReClamp();
 }
 
-// UGUIController::NativePostRender clamps the cursor to the canvas size, which is the menu box for
-// the length of the interface pass, so the cursor stops at the pillarbox. Hooked past the point
-// where the cursor's own scale is taken, which wants the box: the clamped X sits in [EBP-0x14], the
-// clamped Y in EDI and the raw pair at ESI+0x90, so both are redone against the screen.
+// UGUIController::NativePostRender clamps the cursor to the canvas size, the menu box during the
+// interface pass, so it stops at the pillarbox. Hooked past where the cursor's own scale is taken,
+// which wants the box: clamped X in [EBP-0x14], clamped Y in EDI, raw pair at ESI+0x90, both redone
+// against the screen.
 static SafetyHookMid mhCursorClamp{};
 
 static void CursorClamp(SafetyHookContext& ctx)

@@ -19,6 +19,7 @@ import comicpanels;
 import crashdump;
 import blurfix;
 import menuscale;
+import mongoosemenu;
 import hudscale;
 import fmv;
 import introskip;

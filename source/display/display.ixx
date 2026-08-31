@@ -12,24 +12,31 @@ import settings;
 import logging;
 import internalres;
 
-// UD3DRenderDevice holds the window size, the vsync flag and the D3D8 device, so one module owns
-// the render device pointer and hands it out.
-//
-// Field offsets, all from D3DDrv.dll:
-//   +0x0D8  UseVSync            config bool the game has but only honours fullscreen
+// UD3DRenderDevice field offsets, all from D3DDrv.dll:
+//   +0x0D8  UseVSync            config bool the game only honours fullscreen
 //   +0x178  MaxAnisotropy       fetched from D3DCAPS8 at Init, never used by the game
 //   +0x660  RefreshRate         picked by SetRes, written into present parameters
 //   +0x658  SizeX
 //   +0x65C  SizeY
 //   +0x66C  IDirect3DDevice8*
+//   +0x648  RebuildDevice       set by Lock, cleared and acted on by SetRes
 static constexpr auto nOffsetUseVSync = 0xD8;
+static constexpr auto nOffsetRebuildDevice = 0x648;
 static constexpr auto nOffsetMaxAnisotropy = 0x178;
 static constexpr auto nOffsetRefreshRate = 0x660;
 static constexpr auto nOffsetSizeX = 0x658;
 static constexpr auto nOffsetSizeY = 0x65C;
 static constexpr auto nOffsetDevice = 0x66C;
 
-// The game knows fullscreen or a plain window only, so borderless is a windowed device with the
+// UD3DRenderDevice::Lock builds its D3DVIEWPORT8 straight off the UViewport it is handed
+// (X +0x90, Y +0x94, Width +0x88, Height +0x8C) and asserts when SetViewport refuses the rect.
+static constexpr auto nOffsetViewportSizeX = 0x88;
+static constexpr auto nOffsetViewportSizeY = 0x8C;
+static constexpr auto nOffsetViewportOrgX = 0x90;
+static constexpr auto nOffsetViewportOrgY = 0x94;
+
+
+// The game knows fullscreen or a plain window only: borderless is a windowed device with the
 // frame off and the window snapped to the monitor.
 static constexpr auto nModeWindowed = 0;
 static constexpr auto nModeBorderless = 1;
@@ -37,16 +44,14 @@ static constexpr auto nModeFullscreen = 2;
 
 static LONG nSavedStyle = 0;
 static LONG nSavedExStyle = 0;
-static bool bModeApplied = false;
 static HWND hGameWindow = nullptr;
 static int nOutputWidth = 0;
 static int nOutputHeight = 0;
 
 static uint8_t* pRenderDevice = nullptr;
 static void* pLastViewport = nullptr;
-static int nLastFullscreen = 0;
 
-// Read back by comicpanels.ixx, which has no other way to learn the real height when it needs it.
+// Read back by comicpanels.ixx, which has no other way to learn the real height.
 export std::atomic<int> nBackBufferWidth = 0;
 export std::atomic<int> nBackBufferHeight = 0;
 
@@ -54,6 +59,11 @@ export void* GetD3DDevice()
 {
     return pRenderDevice ? *reinterpret_cast<void**>(pRenderDevice + nOffsetDevice) : nullptr;
 }
+
+// Output size, read before internalres stamps the render size over SizeX/SizeY. What a render
+// resolution is a percentage of.
+export int GetDisplayOutputWidth() { return nOutputWidth; }
+export int GetDisplayOutputHeight() { return nOutputHeight; }
 
 export int GetDeviceMaxAnisotropy()
 {
@@ -69,20 +79,38 @@ export MongooseFix::Event<>& onDeviceResetEvent()
 
 static std::atomic<bool> bDisplayChangePending = false;
 
+static bool bForceRebuild = false;
+// Whether the windowed client has been asked for since the last SetRes.
+static bool bSizeApplied = false;
+
+// What the device is built from; anything else in the ini can change without a reset.
+// Multisampling goes into the present parameters and the internal target is built in SetRes, so
+// both only move on a reset.
+using DeviceKey_t = std::array<int32_t, 7>;
+
+static DeviceKey_t DeviceKey()
+{
+    return { MongooseFixSettings.GetInt(PREF_DISPLAYMODE), MongooseFixSettings.GetInt(PREF_RESOLUTIONX),
+        MongooseFixSettings.GetInt(PREF_RESOLUTIONY), MongooseFixSettings.GetInt(PREF_VSYNC),
+        MongooseFixSettings.GetInt(PREF_MSAA), MongooseFixSettings.GetInt(PREF_INTERNALRESX),
+        MongooseFixSettings.GetInt(PREF_INTERNALRESY) };
+}
+
+static DeviceKey_t aDeviceKey{};
+
 // SetRes builds the whole D3DPRESENT_PARAMETERS block on its stack and uses it for CreateDevice,
-// Reset and device-lost recovery, so everything display related is decided here and nowhere else.
+// Reset and device-lost recovery, so everything display related is decided there.
 static SafetyHookInline shSetRes{};
 static SafetyHookInline shPresent{};
 static SafetyHookInline shLock{};
 
-// D3DSWAPEFFECT_COPY_VSYNC is the only windowed vsync Direct3D 8 has, and it rules out the
-// multisampling MSAA needs. Windowed presents go through the compositor anyway, so the frame is
-// paced against it in Present instead and the swap effect is left alone.
+// D3DSWAPEFFECT_COPY_VSYNC is Direct3D 8's only windowed vsync and it rules out multisampling.
+// Windowed presents go through the compositor anyway, so the frame is paced against it in Present
+// and the swap effect is left alone.
 static bool bWindowedVSync = false;
 
-// Fullscreen mode picking scores every display mode by |refresh - 75| and takes the lowest, so a
-// 75 Hz mode wins on any monitor that has one and the frame rate is pinned there whatever the cap
-// says. Scoring by -refresh instead takes the highest the monitor offers.
+// Fullscreen mode picking scores every display mode by |refresh - 75| and takes the lowest, so
+// 75 Hz wins on any monitor that has it. Scoring by -refresh takes the highest offered instead.
 static std::unique_ptr<raw_mem> patchRefreshPreference;
 
 // The viewport window can be a child, and a child ignores WS_POPUP: styles go on the top level.
@@ -107,32 +135,16 @@ static bool MonitorRect(HWND hWindow, RECT& rect)
     return true;
 }
 
-// The monitor the game is on; the primary one until the window exists.
-static void MonitorSize(int& nX, int& nY)
-{
-    MONITORINFO monitor{ sizeof(monitor) };
-    if (GetMonitorInfoW(MonitorFromWindow(GameWindow(), MONITOR_DEFAULTTOPRIMARY), &monitor))
-    {
-        nX = monitor.rcMonitor.right - monitor.rcMonitor.left;
-        nY = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
-    }
-}
-
 // Fullscreen leaves the window to the game; the other two put the frame on or off.
 static void ApplyDisplayMode(int nMode, int nWidth, int nHeight)
 {
     if (nMode == nModeFullscreen)
-    {
-        bModeApplied = true;
         return;
-    }
 
     // First SetRes runs before the window exists; Present retries until it does.
     const auto hWindow = GameWindow();
     if (!hWindow)
         return;
-
-    bModeApplied = true;
 
     if (!nSavedStyle)
     {
@@ -160,19 +172,29 @@ static void ApplyDisplayMode(int nMode, int nWidth, int nHeight)
             SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
 
         // The clip still points at the old rect and is only redone when the game next takes the
-        // mouse; until then the cursor is trapped off the client area.
+        // mouse, trapping the cursor off the client area until then.
         ClipCursor(nullptr);
 
         return;
     }
 
-    RECT client{};
-    if (GetWindowLongW(hWindow, GWL_STYLE) == nSavedStyle && GetClientRect(hWindow, &client)
-        && client.right == nWidth && client.bottom == nHeight)
-        return;
+    // ResizeViewport puts the game's own style back at the end of every SetRes, so the frame goes
+    // on whenever it is missing rather than once. The size is asked for once per SetRes: a client
+    // the window manager will not hand back at exactly this size never compares equal, and resizing
+    // it every present stalls the loading screen.
+    const auto bStyleWrong = GetWindowLongW(hWindow, GWL_STYLE) != nSavedStyle;
 
-    SetWindowLongW(hWindow, GWL_STYLE, nSavedStyle);
-    SetWindowLongW(hWindow, GWL_EXSTYLE, nSavedExStyle);
+    if (bStyleWrong)
+    {
+        SetWindowLongW(hWindow, GWL_STYLE, nSavedStyle);
+        SetWindowLongW(hWindow, GWL_EXSTYLE, nSavedExStyle);
+    }
+    else if (bSizeApplied)
+    {
+        return;
+    }
+
+    bSizeApplied = true;
 
     // Back buffer size is the client area, not the window.
     RECT rect{ 0, 0, nWidth, nHeight };
@@ -184,11 +206,15 @@ static void ApplyDisplayMode(int nMode, int nWidth, int nHeight)
     ClipCursor(nullptr);
 }
 
+// Leaves what it was handed, the size the caller wanted, when there is no monitor to ask.
 static void ResolveDesiredResolution(int& nX, int& nY)
 {
-    auto nMonitorX = GetSystemMetrics(SM_CXSCREEN);
-    auto nMonitorY = GetSystemMetrics(SM_CYSCREEN);
-    MonitorSize(nMonitorX, nMonitorY);
+    RECT monitor{};
+    if (!MonitorRect(GameWindow(), monitor))
+        return;
+
+    const auto nMonitorX = monitor.right - monitor.left;
+    const auto nMonitorY = monitor.bottom - monitor.top;
 
     // Borderless covers the monitor and a windowed present stretches a mismatched back buffer.
     // Render lower through InternalResolution instead.
@@ -223,7 +249,6 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
 
     pRenderDevice = pThis;
     pLastViewport = pViewport;
-    nLastFullscreen = nFullscreen;
 
     ResolveDesiredResolution(nX, nY);
 
@@ -234,6 +259,14 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
 
     bWindowedVSync = bVSync && nFullscreen == 0;
 
+    // A windowed SetRes with a live device that was not fullscreen skips the whole rebuild block:
+    // no present parameters, no Reset, render target fields untouched. That block is where
+    // multisampling, the internal target and vsync land, so the flag Lock uses to demand a rebuild
+    // forces it. Only for the reset this module asks for: forcing it on the game's own calls
+    // rebuilds the device behind every viewport resize, which the window cannot survive.
+    if (std::exchange(bForceRebuild, false) && nFullscreen == 0)
+        *reinterpret_cast<int*>(pThis + nOffsetRebuildDevice) = 1;
+
     // Our render target is D3DPOOL_DEFAULT and SetRes resets the device, so it goes first.
     ReleaseInternalRes();
 
@@ -243,7 +276,7 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     nOutputHeight = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
 
     // Ahead of ApplyInternalRes, while the sizes are still the output size.
-    bModeApplied = false;
+    bSizeApplied = false;
     ApplyDisplayMode(nMode, nOutputWidth, nOutputHeight);
 
     // Stamps the internal render size over SizeX/SizeY, so the read below reports it.
@@ -262,29 +295,50 @@ static int __fastcall SetRes(uint8_t* pThis, void*, void* pViewport, int nX, int
     return nResult;
 }
 
-// Every frame, for whichever viewport is being drawn.
+// The rect has to be the extent of what is bound, and the device's SizeX/SizeY are what that
+// target was built from, internal resolution included. The viewport's own size gives a frame in
+// the corner when it is smaller and a refused rect when it is larger.
+static void StampViewportRect(uint8_t* pThis, uint8_t* pViewport)
+{
+    if (!pThis || !pViewport)
+        return;
+
+    const auto nSizeX = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
+    const auto nSizeY = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
+
+    if (nSizeX < 1 || nSizeY < 1)
+        return;
+
+    // The origin is the viewport's own; moving it moves everything laid out against it.
+    const auto nOrgX = *reinterpret_cast<int*>(pViewport + nOffsetViewportOrgX);
+    const auto nOrgY = *reinterpret_cast<int*>(pViewport + nOffsetViewportOrgY);
+
+    *reinterpret_cast<int*>(pViewport + nOffsetViewportSizeX) = (std::max)(nSizeX - nOrgX, 1);
+    *reinterpret_cast<int*>(pViewport + nOffsetViewportSizeY) = (std::max)(nSizeY - nOrgY, 1);
+}
+
 static void* __fastcall Lock(uint8_t* pThis, void*, void* pViewport, uint8_t* pHitData, int* pHitSize)
 {
+    StampViewportRect(pThis, reinterpret_cast<uint8_t*>(pViewport));
     StampInternalResViewport(reinterpret_cast<uint8_t*>(pViewport));
     return shLock.fastcall<void*>(pThis, nullptr, pViewport, pHitData, pHitSize);
 }
 
 // The ini watcher runs on its own thread and must not touch the device there. Present is the one
-// place in the frame where the device is known idle, so a pending change is taken here.
+// place in the frame where the device is known idle, so pending changes are applied here.
 static void __fastcall Present(uint8_t* pThis, void*, void* pViewport)
 {
     if (bDisplayChangePending.exchange(false) && pRenderDevice)
     {
-        int nX = *reinterpret_cast<int*>(pThis + nOffsetSizeX);
-        int nY = *reinterpret_cast<int*>(pThis + nOffsetSizeY);
-        ResolveDesiredResolution(nX, nY);
-
-        // Straight back through our own hook, so the vsync and resolution work happens once.
-        SetRes(pThis, nullptr, pLastViewport ? pLastViewport : pViewport, nX, nY, nLastFullscreen);
+        // Back through our own hook, which resolves the size and mode itself. Output size, not
+        // SizeX/SizeY: those hold the internal size while scaling is live.
+        bForceRebuild = true;
+        SetRes(pThis, nullptr, pLastViewport, nOutputWidth, nOutputHeight, 0);
     }
 
-    if (!bModeApplied)
-        ApplyDisplayMode(MongooseFixSettings.GetInt(PREF_DISPLAYMODE), nOutputWidth, nOutputHeight);
+    // Both windowed modes are re-asserted every frame, returning on the first compare once the
+    // window matches.
+    ApplyDisplayMode(MongooseFixSettings.GetInt(PREF_DISPLAYMODE), nOutputWidth, nOutputHeight);
 
     PresentInternalRes(pThis);
 
@@ -301,8 +355,8 @@ static void InitD3DDrv()
     if (!hD3DDrv)
         return;
 
-    // The render device keeps its decorated C++ names in the export table, so the two functions
-    // that matter are asked for by name instead of scanned for.
+    // The render device keeps its decorated C++ names in the export table, so these are asked for
+    // by name instead of scanned for.
     auto pSetRes = GetProcAddress(hD3DDrv, "?SetRes@UD3DRenderDevice@@UAEHPAVUViewport@@HHH@Z");
     auto pPresent = GetProcAddress(hD3DDrv, "?Present@UD3DRenderDevice@@UAEXPAVUViewport@@@Z");
     auto pLock = GetProcAddress(hD3DDrv, "?Lock@UD3DRenderDevice@@UAEPAVFRenderInterface@@PAVUViewport@@PAEPAH@Z");
@@ -336,10 +390,20 @@ static void InitD3DDrv()
     if (!shLock)
         LogWarn("Display: UD3DRenderDevice::Lock could not be hooked, an internal resolution is unsafe and stays off");
 
-    // Resolution and vsync both need a device reset, so a change asks for one rather than applying
-    // anything itself.
+    // Resolution and vsync need a device reset, and only when one of them actually moved: a reset
+    // drops the gamma ramp the game set through its Brightness, Gamma and Contrast console commands
+    // and never puts it back, so resetting over an unrelated setting darkens the game until the
+    // player reopens the video page.
+    aDeviceKey = DeviceKey();
+
     MongooseFix::onIniFileChange() += []()
     {
+        const auto key = DeviceKey();
+
+        if (key == aDeviceKey)
+            return;
+
+        aDeviceKey = key;
         bDisplayChangePending = true;
     };
 }
