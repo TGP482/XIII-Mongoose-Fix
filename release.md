@@ -1,33 +1,45 @@
-## XIII Mongoose Fix
+## Features
 
-A fix for the 2003 PC release of XIII, built as an ASI plugin. Nothing in the game folder is
-modified; removing the plugin puts the game back as it was.
+### Display
+- **Display Mode** - Allows you to change between Fullscreen, Borderless and Windowed modes.
+- **Window Resolution** - Sets the game's window resolution, with 0 using your desktop resolution.
+- **Internal Resolution** - Added the option to change the internal resolution to a custom value, to allow for supersampling and downscaling.
+- **Scaling Filter** - Sets the internal resolution scaling filter.
+- **V-Sync** - Restores V-Sync in windowed and borderless, which the game only ever applied in fullscreen.
+- **Max Frame Rate** - Caps the game's frame rate, either at your monitor's refresh rate automatically or at a value you pick, bypassing the game's 60FPS lock.
 
-### Installation
+### Graphics
+- **DirectX Version** - Runs the game's renderer through DirectX 9 via d3d8to9 or the stock DirectX 8 path which the game ships with.
+- **Anisotropic Filtering** - Forces the selected anisotropic filtering level on all textures instead of using the game's defaults.
+- **MSAA** - Enables multisample antialiasing at 2, 4 or 8 samples.
+- **CRT Gamma** - Restores the vibrance and contrast a CRT gave the game's colours. (0) off, (1) on. DirectX 9 only.
 
-1. Extract the archive into the game folder, so `dinput8.dll` sits next to `XIII.exe` and
-   `XIIIMongooseFix.asi` sits in `system\plugins`.
-2. Edit `system\plugins\XIIIMongooseFix.ini` to taste. Every setting is live - save the file with
-   the game running and it applies straight away.
+### Gameplay
+- **Mouse Look Sensitivity** - Adjusts mouse look sensitivity.
+- **Mouse Smoothing** - Toggles mouse smoothing on and off.
 
-### In this release
+### Field of View
+- **Field of View** - Adjusts the base gameplay field of view.
 
-- **Raw mouse input**, one summed delta per frame, so the feel no longer changes with the mouse's
-  polling rate.
-- **Mouse smoothing can be turned off**, which removes the ±1 clamp that swallowed fast flicks and
-  the tail that kept the view moving after the mouse stopped.
-- **Mouse sensitivity multiplier**, plus the option to stop sensitivity changing with the field of
-  view.
-- **Anisotropic filtering** up to 16x. The renderer never set a maximum anisotropy at all, so this
-  was not available at any quality setting.
-- **V-Sync windowed as well as fullscreen.** The game's own option only ever applied fullscreen.
-- **Field of view** between 45 and 145 degrees. Weapon zoom and scopes keep their magnification.
-- **Frame rate cap** raised or removed. The game ships capped at 120.
-- **Resolution** set from the ini, with 0 meaning your desktop resolution.
-- **Comic panel scaling**, fixing interface metrics that were pinned to a 480p screen.
+### Controller
+- **Restored Controller Support** - Full controller support has been restored.
+- **Controller Look Sensitivity** - Adjusts controller look sensitivity.
+- **Vibration** - Restores controller vibration support.
+- **Layout** - Sets the starting pad layout out of the four the Xbox version shipped with.
 
-### Notes
+### General
+- **Skip Intro** - Skips the Ubisoft, alien and nvidia logo movies the exe plays before the menu.
+- **Allow Cheats** - Allows cheats to be used through the console.
 
-- Above roughly 2000 FPS the world clock runs fast, because the engine clamps the frame delta to a
-  0.0005s floor. Set a cap if that matters.
-- Multiplayer tick rates are left alone.
+### Fixes
+- Fixed mouse movement breaking with high polling rates and removed the deadzone.
+- Fixed an issue where mouse sensitivity changed with the field of view.
+- Fixed HUD elements, menus, blur effects and comic panels not scaling properly with resolution.
+- Fixed the cutscene camera never turning onto its focus target above 162 fps, leaving the shot pointed at whatever angle it started on.
+- Fixed getting stuck when squeezing through narrow gaps at high frame rates.
+- Fixed an issue with FMVs playing silently.
+
+### Credits
+- [ThirteenAG](https://github.com/ThirteenAG) - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader).
+- [crosire](https://github.com/crosire) - [d3d8to9](https://github.com/crosire/d3d8to9).
+- [CeeJayDK](https://github.com/CeeJayDK) - [SweetFX](https://github.com/CeeJayDK/SweetFX), CRT Gamma.
