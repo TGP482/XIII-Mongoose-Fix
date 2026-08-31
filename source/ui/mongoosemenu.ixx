@@ -386,6 +386,7 @@ static Setting aSettings[]
     { "Graphics", "DirectXVersion", "DirectX Version", Kind::Choice, CHOICE(aDirectX), 0, 0, 0, 0, 1, 1 },
     { "Graphics", "AnisotropicFiltering", "Anisotropic Filtering", Kind::Choice, CHOICE(aAniso), 0, 0, 0, 0, 16, 16 },
     { "Graphics", "MSAA", "MSAA", Kind::Choice, CHOICE(aMSAA), 0, 0, 0, 0, 0, 0 },
+    { "Graphics", "CRTGamma", "CRT Gamma", Kind::Toggle, nullptr, 0, 0, 1, 1, 0, 0, 0 },
     { "Gameplay", "MouseLookSensitivity", "Mouse Look Sensitivity", Kind::Number, nullptr, 0, 0.1f, 20.0f, 0.1f, 2, 3.0f, 3.0f },
     { "Gameplay", "MouseSmoothing", "Mouse Smoothing", Kind::Toggle, nullptr, 0, 0, 1, 1, 0, 0, 0 },
     { "FieldOfView", "FieldOfView", "Field of View", Kind::Number, nullptr, 0, 45.0f, 145.0f, 1.0f, 2, 91.31f, 91.31f },

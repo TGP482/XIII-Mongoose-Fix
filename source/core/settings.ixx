@@ -18,6 +18,7 @@ export enum Pref
     PREF_DIRECTXVERSION,
     PREF_ANISOTROPICFILTERING,
     PREF_MSAA,
+    PREF_CRTGAMMA,
     PREF_INTERNALRESX,
     PREF_INTERNALRESY,
     PREF_SCALINGFILTER,
@@ -77,6 +78,8 @@ public:
         // 0, 2, 4 or 8; anything between rounds down to the next real level.
         auto nMSAA = std::clamp(iniReader.ReadInteger("Graphics", "MSAA", 0), 0, 8);
         mPrefs[PREF_MSAA] = nMSAA >= 8 ? 8 : nMSAA >= 4 ? 4 : nMSAA >= 2 ? 2 : 0;
+
+        mPrefs[PREF_CRTGAMMA] = std::clamp(iniReader.ReadInteger("Graphics", "CRTGamma", 0), 0, 1);
 
         auto nInternalX = iniReader.ReadInteger("Display", "InternalResolutionX", 0);
         auto nInternalY = iniReader.ReadInteger("Display", "InternalResolutionY", 0);
