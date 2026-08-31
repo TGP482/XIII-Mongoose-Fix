@@ -3,6 +3,7 @@ module;
 #include <common.hxx>
 #include <FileWatch.hpp>
 #include <variant>
+#include <chrono>
 
 export module settings;
 
@@ -50,11 +51,18 @@ public:
         CIniReader iniReader("");
 
         // A failed open yields all defaults. The menu replaces the ini by rename and the watcher
-        // fires around it, so a read landing in that window would reset every setting to stock.
+        // fires around it, so a read landing in that window sees no keys. Giving up there drops the
+        // change the watcher woke for, which is why a menu toggle sometimes needed doing twice.
         std::error_code ec;
-        if (std::filesystem::exists(iniReader.GetIniPath(), ec)
-            && iniReader.ReadInteger("Display", "DisplayMode", -1) == -1)
-            return;
+        for (auto nTry = 0; std::filesystem::exists(iniReader.GetIniPath(), ec)
+            && iniReader.ReadInteger("Display", "DisplayMode", -1) == -1; ++nTry)
+        {
+            if (nTry == 20)
+                return;
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            iniReader = CIniReader("");
+        }
 
         // (0) windowed, (1) borderless, (2) fullscreen.
         mPrefs[PREF_DISPLAYMODE] = std::clamp(iniReader.ReadInteger("Display", "DisplayMode", 2), 0, 2);
